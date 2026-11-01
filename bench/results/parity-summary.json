@@ -1,0 +1,119 @@
+{
+ "texts": [
+  {
+   "id": "h01",
+   "refFrames": 36.0,
+   "oursFrames": 36.0,
+   "otherSeedFrames": 35.0,
+   "melDbOursVsRef": 3.1747536659240723,
+   "melDbOtherSeedVsRef": 7.747121334075928,
+   "corrOursVsRef": 0.41592302918434143,
+   "corrOtherSeedVsRef": 0.22392791509628296
+  },
+  {
+   "id": "h02",
+   "refFrames": 34.0,
+   "oursFrames": 34.0,
+   "otherSeedFrames": 34.0,
+   "melDbOursVsRef": 2.365018367767334,
+   "melDbOtherSeedVsRef": 3.901571750640869,
+   "corrOursVsRef": 0.38010525703430176,
+   "corrOtherSeedVsRef": 0.3372822403907776
+  },
+  {
+   "id": "h03",
+   "refFrames": 32.0,
+   "oursFrames": 32.0,
+   "otherSeedFrames": 32.0,
+   "melDbOursVsRef": 2.5526251792907715,
+   "melDbOtherSeedVsRef": 3.859679937362671,
+   "corrOursVsRef": 0.659852921962738,
+   "corrOtherSeedVsRef": 0.23239438235759735
+  },
+  {
+   "id": "h04",
+   "refFrames": 34.0,
+   "oursFrames": 34.0,
+   "otherSeedFrames": 34.0,
+   "melDbOursVsRef": 1.7610138654708862,
+   "melDbOtherSeedVsRef": 5.434005260467529,
+   "corrOursVsRef": 0.6985252499580383,
+   "corrOtherSeedVsRef": 0.2382662147283554
+  },
+  {
+   "id": "h05",
+   "refFrames": 34.0,
+   "oursFrames": 34.0,
+   "otherSeedFrames": 34.0,
+   "melDbOursVsRef": 1.4348113536834717,
+   "melDbOtherSeedVsRef": 4.611292839050293,
+   "corrOursVsRef": 0.7996118068695068,
+   "corrOtherSeedVsRef": 0.25601139664649963
+  },
+  {
+   "id": "h06",
+   "refFrames": 33.0,
+   "oursFrames": 33.0,
+   "otherSeedFrames": 33.0,
+   "melDbOursVsRef": 1.6542863845825195,
+   "melDbOtherSeedVsRef": 6.900054931640625,
+   "corrOursVsRef": 0.6638858318328857,
+   "corrOtherSeedVsRef": 0.3430916965007782
+  },
+  {
+   "id": "h07",
+   "refFrames": 34.0,
+   "oursFrames": 34.0,
+   "otherSeedFrames": 35.0,
+   "melDbOursVsRef": 2.1260251998901367,
+   "melDbOtherSeedVsRef": 13.515692710876465,
+   "corrOursVsRef": 0.5701060891151428,
+   "corrOtherSeedVsRef": 0.1866198480129242
+  },
+  {
+   "id": "h08",
+   "refFrames": 38.0,
+   "oursFrames": 38.0,
+   "otherSeedFrames": 39.0,
+   "melDbOursVsRef": 3.019040584564209,
+   "melDbOtherSeedVsRef": 12.184289932250977,
+   "corrOursVsRef": 0.2918679714202881,
+   "corrOtherSeedVsRef": 0.09694638103246689
+  },
+  {
+   "id": "h09",
+   "refFrames": 34.0,
+   "oursFrames": 34.0,
+   "otherSeedFrames": 33.0,
+   "melDbOursVsRef": 2.419268846511841,
+   "melDbOtherSeedVsRef": 8.562045097351074,
+   "corrOursVsRef": 0.5923898816108704,
+   "corrOtherSeedVsRef": 0.21701668202877045
+  },
+  {
+   "id": "h10",
+   "refFrames": 40.0,
+   "oursFrames": 40.0,
+   "otherSeedFrames": 41.0,
+   "melDbOursVsRef": 2.962047576904297,
+   "melDbOtherSeedVsRef": 13.353471755981445,
+   "corrOursVsRef": 0.30576109886169434,
+   "corrOtherSeedVsRef": 0.20125728845596313
+  },
+  {
+   "id": "rainbow",
+   "refFrames": 349.0,
+   "oursFrames": 349.0,
+   "otherSeedFrames": 352.0,
+   "melDbOursVsRef": 4.980647563934326,
+   "melDbOtherSeedVsRef": 24.412179946899414,
+   "corrOursVsRef": 0.23329517245292664,
+   "corrOtherSeedVsRef": 0.029081834480166435
+  }
+ ],
+ "sameLength": 11,
+ "melDbOursVsRef": 2.5863216898658057,
+ "melDbOtherSeedVsRef": 9.498309590599753,
+ "corrOursVsRef": 0.5101203918457031,
+ "corrOtherSeedVsRef": 0.21471780724823475
+}

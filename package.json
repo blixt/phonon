@@ -1,0 +1,31 @@
+{
+  "name": "phonon-webgpu",
+  "version": "0.1.0",
+  "description": "Phonon 31M text-to-speech on WebGPU, with the time of every word.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/phonon.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src",
+    "NOTICE",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --format=esm --target=es2022 --outfile=dist/phonon.js && esbuild demo/demo.ts --bundle --format=esm --target=es2022 --outfile=docs/demo.js && tsc -p tsconfig.build.json",
+    "check": "tsc -p . --noEmit",
+    "bench": "node bench/run.mjs",
+    "test": "esbuild src/*.test.ts --bundle --platform=node --format=esm --outdir=.test --log-level=warning && node --test .test/"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "kokoro-js": "^1.2.1",
+    "phonon-tts": "^0.6.0",
+    "typescript": "^7.0.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/blixt/phonon"
+  }
+}
