@@ -744,8 +744,6 @@ fn main(@builtin(local_invocation_index) li: u32) {
 }
 
 // src/checkpoint.ts
-var Q8_LEAST = 16384;
-var H2 = 512;
 function readSafetensors(buffer) {
   const view = new DataView(buffer);
   const headerSize = Number(view.getBigUint64(0, true));
@@ -810,266 +808,6 @@ function toF16(values) {
   }
   return out;
 }
-var halfTable = null;
-function halves() {
-  if (halfTable) return halfTable;
-  halfTable = new Float32Array(65536);
-  for (let h = 0; h < 65536; h++) {
-    const e = h >> 10 & 31;
-    const m = h & 1023;
-    const v = e === 0 ? m * 2 ** -24 : e === 31 ? m ? Number.NaN : Infinity : (1 + m / 1024) * 2 ** (e - 15);
-    halfTable[h] = h & 32768 ? -v : v;
-  }
-  return halfTable;
-}
-function quantize(values) {
-  const table = halves();
-  const bits = toF16(values);
-  const q = new Int8Array(values.length);
-  const scales = new Uint16Array(values.length / Q8_GROUP);
-  const max = new Float32Array(scales.length);
-  for (let g = 0; g < max.length; g++)
-    for (let i = g * Q8_GROUP; i < (g + 1) * Q8_GROUP; i++)
-      max[g] = Math.max(max[g], Math.abs(table[bits[i]]));
-  for (let g = 0; g < max.length; g++) max[g] = Math.fround(max[g] / 127) || 1;
-  const scaleBits = toF16(max);
-  for (let g = 0; g < scales.length; g++) {
-    const sb = scaleBits[g] & 32767 ? scaleBits[g] : 15360;
-    scales[g] = sb;
-    const s = table[sb];
-    for (let i = g * Q8_GROUP; i < (g + 1) * Q8_GROUP; i++) {
-      const x = Math.fround(table[bits[i]] / s);
-      const r = Math.round(x);
-      q[i] = Math.max(-127, Math.min(127, r - x === 0.5 && r % 2 !== 0 ? r - 1 : r));
-    }
-  }
-  return { q, scales };
-}
-function matvec2(w, x, rows, b) {
-  const cols = x.length;
-  const y = new Float32Array(rows);
-  for (let r = 0; r < rows; r++) {
-    let s = b ? b[r] : 0;
-    for (let c = 0; c < cols; c++) s += w[r * cols + c] * x[c];
-    y[r] = s;
-  }
-  return y;
-}
-var silu = (v) => v.map((x) => x / (1 + Math.exp(-x)));
-function convertCheckpoint(buffer) {
-  const src = readSafetensors(buffer);
-  const get = (name) => {
-    const t = src.get(name);
-    if (!t) throw new Error(`The checkpoint has no ${name}`);
-    return t.data;
-  };
-  const tensors = {};
-  const put = (name, data) => tensors[name] = data;
-  const cat = (...parts3) => {
-    const out = new Float32Array(parts3.reduce((n, p) => n + p.length, 0));
-    let o = 0;
-    for (const p of parts3) out.set(p, (o += p.length) - p.length);
-    return out;
-  };
-  const rotaryRows = (w, cols) => {
-    const out = new Float32Array(w.length);
-    for (let h = 0; h < 8; h++)
-      for (let j = 0; j < 32; j++)
-        for (const [from, to] of [
-          [2 * j, j],
-          [2 * j + 1, j + 32]
-        ])
-          out.set(
-            w.subarray((h * 64 + from) * cols, (h * 64 + from + 1) * cols),
-            (h * 64 + to) * cols
-          );
-    return out;
-  };
-  const qkv = (w) => cat(
-    rotaryRows(w.subarray(0, H2 * H2), H2),
-    rotaryRows(w.subarray(H2 * H2, 2 * H2 * H2), H2),
-    w.subarray(2 * H2 * H2)
-  );
-  const scaleRows = (w, scale) => {
-    const cols = w.length / scale.length;
-    return w.map((v, i) => v * scale[Math.floor(i / cols)]);
-  };
-  const C = "flow_lm.condition_provider.conditioners.";
-  const pace = {
-    speakers: get(`${C}num_speakers.embed.weight`).slice(16, 32),
-    speakersProj: get(`${C}num_speakers.output_proj.weight`),
-    durationProj: get(`${C}duration_delta.output_proj.weight`),
-    latentProj: get("flow_lm.input_linear.weight"),
-    bos: get("flow_lm.bos_emb")
-  };
-  const start = paceVectors(pace, 0);
-  put("embed", get(`${C}transcript_in_segment.embed.weight`));
-  put("prompt_proj", get(`${C}speaker_wavs.output_proj.weight`));
-  put("latent_proj", pace.latentProj);
-  put("cond", start.cond);
-  put("bos_embed", start.bos);
-  for (let i = 0; i < 6; i++) {
-    const p = `flow_lm.transformer.layers.${i}.`;
-    put(`l${i}.ln1.w`, get(p + "norm1.weight"));
-    put(`l${i}.ln1.b`, get(p + "norm1.bias"));
-    put(`l${i}.qkv`, qkv(get(p + "self_attn.in_proj.weight")));
-    put(`l${i}.o`, get(p + "self_attn.out_proj.weight"));
-    put(`l${i}.ln2.w`, get(p + "norm2.weight"));
-    put(`l${i}.ln2.b`, get(p + "norm2.bias"));
-    put(`l${i}.fc1`, get(p + "linear1.weight"));
-    put(`l${i}.fc2`, get(p + "linear2.weight"));
-  }
-  put("norm.w", get("flow_lm.out_norm.weight"));
-  put("norm.b", get("flow_lm.out_norm.bias"));
-  put("eos.w", get("flow_lm.out_eos.weight"));
-  put("eos.b", get("flow_lm.out_eos.bias"));
-  put("lat_mean", get("flow_lm.emb_mean"));
-  put("lat_std", get("flow_lm.emb_std"));
-  const F = "flow_lm.flow_net.";
-  const timeEmbedding = (k, t) => {
-    const q = `${F}time_embed.${k}.`;
-    const freqs = get(q + "freqs");
-    const e = new Float32Array(2 * freqs.length);
-    freqs.forEach((f, i) => {
-      e[i] = Math.cos(t * f);
-      e[freqs.length + i] = Math.sin(t * f);
-    });
-    const hdn = silu(matvec2(get(q + "mlp.0.weight"), e, H2, get(q + "mlp.0.bias")));
-    const out = matvec2(get(q + "mlp.2.weight"), hdn, H2, get(q + "mlp.2.bias"));
-    const ms = out.reduce((s, v) => s + v * v, 0) / H2;
-    const alpha = get(q + "mlp.3.alpha");
-    return out.map((v, i) => v / Math.sqrt(ms + 1e-5) * alpha[i]);
-  };
-  const t0 = timeEmbedding(0, 0);
-  const t1 = timeEmbedding(1, 1);
-  const condBias = get(F + "cond_embed.bias").map((v, i) => v + (t0[i] + t1[i]) / 2);
-  put("fh.in.w", get(F + "input_proj.weight"));
-  put("fh.in.b", get(F + "input_proj.bias"));
-  put("fh.cond.w", get(F + "cond_embed.weight"));
-  put("fh.cond.b", condBias);
-  const blocks = [0, 1, 2, 3, 4, 5].map((i) => `${F}res_blocks.${i}.`);
-  put(
-    "fh.ada.w",
-    cat(
-      ...blocks.map((b) => get(b + "adaLN_modulation.1.weight")),
-      get(F + "final_layer.adaLN_modulation.1.weight")
-    )
-  );
-  put(
-    "fh.ada.b",
-    cat(
-      ...blocks.map((b) => get(b + "adaLN_modulation.1.bias")),
-      get(F + "final_layer.adaLN_modulation.1.bias")
-    )
-  );
-  blocks.forEach((b, i) => {
-    put(`fh${i}.ln.w`, get(b + "in_ln.weight"));
-    put(`fh${i}.ln.b`, get(b + "in_ln.bias"));
-    put(`fh${i}.fc1.w`, get(b + "mlp.0.weight"));
-    put(`fh${i}.fc1.b`, get(b + "mlp.0.bias"));
-    put(`fh${i}.fc2.w`, get(b + "mlp.2.weight"));
-    put(`fh${i}.fc2.b`, get(b + "mlp.2.bias"));
-  });
-  put("fh.out.w", get(F + "final_layer.linear.weight"));
-  put("fh.out.b", get(F + "final_layer.linear.bias"));
-  const P = get("mimi.quantizer.output_proj.weight");
-  const up = get("mimi.upsample.convtr.convtr.weight");
-  const W = new Float32Array(512 * 16 * 2 * 32);
-  for (let c = 0; c < 512; c++)
-    for (let ph = 0; ph < 16; ph++)
-      for (let j = 0; j < 2; j++)
-        for (let i = 0; i < 32; i++)
-          W[((c * 16 + ph) * 2 + j) * 32 + i] = up[c * 32 + j * 16 + ph] * P[c * 32 + i];
-  put("up", W);
-  for (let i = 0; i < 2; i++) {
-    const p = `mimi.decoder_transformer.transformer.layers.${i}.`;
-    put(`d${i}.ln1.w`, get(p + "norm1.weight"));
-    put(`d${i}.ln1.b`, get(p + "norm1.bias"));
-    put(`d${i}.qkv`, qkv(get(p + "self_attn.in_proj.weight")));
-    put(`d${i}.o`, scaleRows(get(p + "self_attn.out_proj.weight"), get(p + "layer_scale_1.scale")));
-    put(`d${i}.ln2.w`, get(p + "norm2.weight"));
-    put(`d${i}.ln2.b`, get(p + "norm2.bias"));
-    put(`d${i}.fc1`, get(p + "linear1.weight"));
-    put(`d${i}.fc2`, scaleRows(get(p + "linear2.weight"), get(p + "layer_scale_2.scale")));
-  }
-  const conv = (name, key) => {
-    const w = get(key + ".conv.weight");
-    const [cout, cin, k] = src.get(key + ".conv.weight").shape;
-    const out = new Float32Array(w.length);
-    for (let o = 0; o < cout; o++)
-      for (let i = 0; i < cin; i++)
-        for (let t = 0; t < k; t++) out[(o * k + t) * cin + i] = w[(o * cin + i) * k + t];
-    put(name + ".w", out);
-    put(name + ".b", get(key + ".conv.bias"));
-  };
-  const convT = (name, key, stride) => {
-    const w = get(key + ".convtr.weight");
-    const [cin, cout] = src.get(key + ".convtr.weight").shape;
-    const out = new Float32Array(w.length);
-    for (let o = 0; o < cout; o++)
-      for (let ph = 0; ph < stride; ph++)
-        for (let j = 0; j < 2; j++)
-          for (let i = 0; i < cin; i++)
-            out[((o * stride + ph) * 2 + j) * cin + i] = w[(i * cout + o) * 2 * stride + j * stride + ph];
-    put(name + ".w", out);
-    put(name + ".b", get(key + ".convtr.bias"));
-  };
-  const L = "mimi.decoder.model.";
-  conv("s0", L + "0");
-  convT("s1", L + "2", 6);
-  conv("s1r1", L + "3.block.1");
-  conv("s1r2", L + "3.block.3");
-  convT("s2", L + "5", 5);
-  conv("s2r1", L + "6.block.1");
-  conv("s2r2", L + "6.block.3");
-  convT("s3", L + "8", 4);
-  conv("s3r1", L + "9.block.1");
-  conv("s3r2", L + "9.block.3");
-  conv("s4", L + "11");
-  const parts2 = [];
-  let size = 0;
-  const place = (bytes) => {
-    const at2 = size;
-    parts2.push(bytes);
-    size += Math.ceil(bytes.byteLength / 256) * 256;
-    return at2;
-  };
-  const layout = {};
-  for (const [name, data] of Object.entries(tensors)) {
-    if (data.length < Q8_LEAST) {
-      layout[name] = { offset: place(new Uint8Array(toF16(data).buffer)), count: data.length };
-      continue;
-    }
-    const { q, scales } = quantize(data);
-    const offset = place(new Uint8Array(q.buffer));
-    layout[name] = { offset, count: data.length, scales: place(new Uint8Array(scales.buffer)) };
-  }
-  const blob = new Uint8Array(size);
-  let at = 0;
-  for (const p of parts2) {
-    blob.set(p, at);
-    at += Math.ceil(p.byteLength / 256) * 256;
-  }
-  return { blob, tensors: layout, pace };
-}
-function packModel(model2) {
-  const pace = Object.entries(model2.pace);
-  const header = new TextEncoder().encode(
-    JSON.stringify({ tensors: model2.tensors, pace: pace.map(([k, v]) => [k, v.length]) })
-  );
-  const at = Math.ceil((4 + header.length) / 4) * 4;
-  const floats = pace.reduce((n, [, v]) => n + v.length, 0);
-  const out = new Uint8Array(at + floats * 4 + model2.blob.byteLength);
-  new DataView(out.buffer).setUint32(0, header.length, true);
-  out.set(header, 4);
-  let o = at;
-  for (const [, v] of pace) {
-    out.set(new Uint8Array(v.buffer, v.byteOffset, v.byteLength), o);
-    o += v.byteLength;
-  }
-  out.set(model2.blob, o);
-  return out;
-}
 function unpackModel(buffer) {
   const length = new DataView(buffer).getUint32(0, true);
   const header = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, 4, length)));
@@ -1097,9 +835,10 @@ var PHONON_REVISION = "92741c5b07d085ff840e26fea8ce43110b87852f";
 var VOICES_REPO = "gradium/phonon-voices";
 var VOICES_REVISION = "0ee17205f254b5abc43b266c8a0f215565c352f7";
 var hubFile = (repo, revision, path) => `https://huggingface.co/${repo}/resolve/${revision}/${path}`;
+var WEIGHTS_REPO = "blixt/phonon-31m-en-webgpu";
+var WEIGHTS_REVISION = "f4635a6dddaa6072451e0155c03c97fbe889b6ec";
 var MODEL_CACHE = "phonon-webgpu";
-var CHECKPOINT_URL = hubFile(PHONON_REPO, PHONON_REVISION, "model.safetensors");
-var MODEL_URL = `${CHECKPOINT_URL}?form=int8-1`;
+var WEIGHTS_URL = hubFile(WEIGHTS_REPO, WEIGHTS_REVISION, "phonon-31m-en.int8.bin");
 var TOKENIZER_URL = hubFile(PHONON_REPO, PHONON_REVISION, "tokenizer.5.0.0.json");
 var CATALOG_URL = hubFile(VOICES_REPO, VOICES_REVISION, "voices.jsonl");
 var voiceUrl = (id) => hubFile(VOICES_REPO, VOICES_REVISION, `voices/${id}.safetensors`);
@@ -1355,7 +1094,7 @@ var Graph = class {
 };
 
 // src/lm.ts
-var H3 = 512;
+var H2 = 512;
 var FF = 2048;
 var PROMPT = 125;
 var S_MAX = 1024;
@@ -1374,7 +1113,7 @@ var ALIGN = { lo: PROMPT, width: TEXT_MAX };
 var KV_BYTES = 2;
 function rowBuffers(g, rows) {
   const r = (n) => g.buffer(rows * n * 4);
-  return { x: r(H3), h: r(H3), qkv: r(3 * H3), q: r(H3), att: r(H3), ff: r(FF) };
+  return { x: r(H2), h: r(H2), qkv: r(3 * H2), q: r(H2), att: r(H2), ff: r(FF) };
 }
 function layerRows(g, pre, o) {
   const { B, rows, cache } = o;
@@ -1382,7 +1121,7 @@ function layerRows(g, pre, o) {
   const at = g.u(UNIFORMS.rows, { rows, pos0: o.pos0 });
   return [
     g.layernorm(B.x, B.h, rows, `${pre}.ln1.w`, `${pre}.ln1.b`, LN_EPS, gate),
-    ...g.gemm(B.h, `${pre}.qkv`, B.qkv, { M: rows, K: H3, N: 3 * H3, gate }),
+    ...g.gemm(B.h, `${pre}.qkv`, B.qkv, { M: rows, K: H2, N: 3 * H2, gate }),
     g.op(
       ropeKV({ theta: ROPE_THETA, cache }),
       [B.qkv, B.q, o.kc, o.vc, g.state, at],
@@ -1393,13 +1132,13 @@ function layerRows(g, pre, o) {
       [B.q, o.kc, o.vc, B.att, g.state, at],
       [Math.ceil(rows / 16), 8, 1]
     ),
-    ...g.gemm(B.att, `${pre}.o`, B.x, { M: rows, K: H3, N: H3, res: "add", rbuf: B.x, gate }),
+    ...g.gemm(B.att, `${pre}.o`, B.x, { M: rows, K: H2, N: H2, res: "add", rbuf: B.x, gate }),
     g.layernorm(B.x, B.h, rows, `${pre}.ln2.w`, `${pre}.ln2.b`, LN_EPS, gate),
-    ...g.gemm(B.h, `${pre}.fc1`, B.ff, { M: rows, K: H3, N: FF, act: "gelu", gate }),
+    ...g.gemm(B.h, `${pre}.fc1`, B.ff, { M: rows, K: H2, N: FF, act: "gelu", gate }),
     ...g.gemm(B.ff, `${pre}.fc2`, o.out?.buf ?? B.x, {
       M: rows,
       K: FF,
-      N: H3,
+      N: H2,
       res: "add",
       rbuf: B.x,
       yo: o.out?.yo ?? 0,
@@ -1438,25 +1177,25 @@ var LanguageModel = class {
     this.g = g;
     const rows = PREFILL.at(-1);
     this.rows = rowBuffers(g, rows);
-    this.kc = Array.from({ length: 6 }, () => g.buffer(S_MAX * H3 * KV_BYTES));
-    this.vc = Array.from({ length: 6 }, () => g.buffer(S_MAX * H3 * KV_BYTES));
-    this.cond = g.buffer(H3 * 4);
+    this.kc = Array.from({ length: 6 }, () => g.buffer(S_MAX * H2 * KV_BYTES));
+    this.vc = Array.from({ length: 6 }, () => g.buffer(S_MAX * H2 * KV_BYTES));
+    this.cond = g.buffer(H2 * 4);
     this.ada = g.buffer(10240 * 4);
-    this.fh = g.buffer(H3 * 4);
-    this.ft = g.buffer(H3 * 4);
+    this.fh = g.buffer(H2 * 4);
+    this.ft = g.buffer(H2 * 4);
     this.z = g.buffer(32 * 4);
     this.lat = g.buffer(32 * 4);
     this.lats = g.buffer(F_MAX * 32 * 4);
     this.ids = g.buffer(rows * 4);
-    this.bos = g.buffer(H3 * 4);
+    this.bos = g.buffer(H2 * 4);
     this.parts = g.buffer(SPLITS * 8 * 66 * 4);
-    this.voiceIn = g.buffer(PROMPT * H3 * 4);
+    this.voiceIn = g.buffer(PROMPT * H2 * 4);
     this.align = g.buffer(F_MAX * TEXT_MAX * 4);
     this.noise = g.u(UNIFORMS.noise, {});
     this.tail = this.tailOps();
     this.step = [...Array.from({ length: 6 }, (_, i) => this.stepLayer(i)).flat(), ...this.tail];
     this.voiceOps = [
-      ...g.gemm(this.voiceIn, "prompt_proj", this.rows.x, { M: PROMPT, K: H3, N: H3, gate: "none" }),
+      ...g.gemm(this.voiceIn, "prompt_proj", this.rows.x, { M: PROMPT, K: H2, N: H2, gate: "none" }),
       ...this.layers(PROMPT, 0)
     ];
     const em = g.q8("embed");
@@ -1472,7 +1211,7 @@ var LanguageModel = class {
               this.rows.x,
               g.u(UNIFORMS.embedRows, { eo: em.wo, eso: em.wso, bo: g.half("bos_embed") })
             ],
-            [n * H3 / 256, 1, 1]
+            [n * H2 / 256, 1, 1]
           ),
           ...this.layers(n, PROMPT, true)
         ]
@@ -1498,7 +1237,7 @@ var LanguageModel = class {
   /** A voice's prompt rows through every layer, its keys and values kept in a new buffer. */
   voice(latents) {
     const { device } = this.g;
-    const bytes = PROMPT * H3 * KV_BYTES;
+    const bytes = PROMPT * H2 * KV_BYTES;
     const kv = this.g.buffer(12 * bytes);
     device.queue.writeBuffer(
       this.voiceIn,
@@ -1534,14 +1273,14 @@ var LanguageModel = class {
     state[STATE.after] = framesAfterEos;
     state[STATE.text] = ids.length;
     device.queue.writeBuffer(this.g.state, 0, state);
-    const bytes = PROMPT * H3 * KV_BYTES;
+    const bytes = PROMPT * H2 * KV_BYTES;
     for (let i = 0; i < 6; i++) {
       enc.copyBufferToBuffer(voice, 2 * i * bytes, this.kc[i], 0, bytes);
       enc.copyBufferToBuffer(voice, (2 * i + 1) * bytes, this.vc[i], 0, bytes);
     }
     encode(enc, this.prefills.get(n));
-    enc.copyBufferToBuffer(this.rows.x, ids.length * H3 * 4, this.bos, 0, H3 * 4);
-    enc.copyBufferToBuffer(this.bos, 0, this.rows.x, 0, H3 * 4);
+    enc.copyBufferToBuffer(this.rows.x, ids.length * H2 * 4, this.bos, 0, H2 * 4);
+    enc.copyBufferToBuffer(this.bos, 0, this.rows.x, 0, H2 * 4);
     encode(enc, this.tail);
   }
   /** A step's layer: one row at the state's position, attention split over the keys. */
@@ -1551,8 +1290,8 @@ var LanguageModel = class {
     const pre = `l${i}`;
     return [
       g.gemv(B.x, `${pre}.qkv`, B.qkv, {
-        K: H3,
-        N: 3 * H3,
+        K: H2,
+        N: 3 * H2,
         ln: { w: `${pre}.ln1.w`, b: `${pre}.ln1.b`, eps: LN_EPS }
       }),
       i === ALIGN_LAYER ? g.op(
@@ -1565,19 +1304,19 @@ var LanguageModel = class {
         [SPLITS, 8, 1]
       ),
       g.gemv(g.zero, `${pre}.o`, B.x, {
-        K: H3,
-        N: H3,
+        K: H2,
+        N: H2,
         res: "add",
         rbuf: B.x,
         combine: { splits: SPLITS, parts: this.parts }
       }),
       g.gemv(B.x, `${pre}.fc1`, B.ff, {
-        K: H3,
+        K: H2,
         N: FF,
         act: "gelu",
         ln: { w: `${pre}.ln2.w`, b: `${pre}.ln2.b`, eps: LN_EPS }
       }),
-      g.gemv(B.ff, `${pre}.fc2`, B.x, { K: FF, N: H3, res: "add", rbuf: B.x })
+      g.gemv(B.ff, `${pre}.fc2`, B.x, { K: FF, N: H2, res: "add", rbuf: B.x })
     ];
   }
   /** From the final hidden state (row 0 of x): the flow head samples the next latent, then its
@@ -1589,8 +1328,8 @@ var LanguageModel = class {
       const a = i * 1536;
       return [
         g.gemv(this.fh, `fh${i}.fc1.w`, this.ft, {
-          K: H3,
-          N: H3,
+          K: H2,
+          N: H2,
           bias: `fh${i}.fc1.b`,
           act: "silu",
           ln: {
@@ -1603,8 +1342,8 @@ var LanguageModel = class {
           }
         }),
         g.gemv(this.ft, `fh${i}.fc2.w`, this.fh, {
-          K: H3,
-          N: H3,
+          K: H2,
+          N: H2,
           bias: `fh${i}.fc2.b`,
           res: "gate",
           rbuf: this.fh,
@@ -1616,18 +1355,18 @@ var LanguageModel = class {
     const fa = 6 * 1536;
     return [
       g.gemv(x, "fh.cond.w", this.cond, {
-        K: H3,
-        N: H3,
+        K: H2,
+        N: H2,
         bias: "fh.cond.b",
         act: "silu",
         ln: { w: "norm.w", b: "norm.b", eps: LN_EPS }
       }),
-      g.gemv(this.cond, "fh.ada.w", this.ada, { K: H3, N: 10240, bias: "fh.ada.b" }),
+      g.gemv(this.cond, "fh.ada.w", this.ada, { K: H2, N: 10240, bias: "fh.ada.b" }),
       g.op(noise(), [this.z, g.state, this.noise], [1, 1, 1]),
-      g.gemv(this.z, "fh.in.w", this.fh, { K: 32, N: H3, bias: "fh.in.b" }),
+      g.gemv(this.z, "fh.in.w", this.fh, { K: 32, N: H2, bias: "fh.in.b" }),
       ...blocks,
       g.gemv(this.fh, "fh.out.w", this.lat, {
-        K: H3,
+        K: H2,
         N: 32,
         bias: "fh.out.b",
         res: "add",
@@ -1651,7 +1390,7 @@ var LanguageModel = class {
         ],
         [1, 1, 1]
       ),
-      g.gemv(this.lat, "latent_proj", x, { K: 32, N: H3, res: "vec", vname: "cond" })
+      g.gemv(this.lat, "latent_proj", x, { K: 32, N: H2, res: "vec", vname: "cond" })
     ];
   }
 };
@@ -1691,7 +1430,7 @@ var Codec = class {
     this.stages = [tr, s0, s1, s1r, s2, s2r, s3, s3r];
     this.audio = g.buffer(C_MAX * FRAME2 * 4);
     const B = rowBuffers(g, T);
-    const rings = [0, 1].map(() => ({ kc: g.buffer(RING * H3 * 4), vc: g.buffer(RING * H3 * 4) }));
+    const rings = [0, 1].map(() => ({ kc: g.buffer(RING * H2 * 4), vc: g.buffer(RING * H2 * 4) }));
     const gate = "chunk";
     const opsFor = (C) => {
       const T2 = 16 * C;
@@ -1826,7 +1565,7 @@ var PhononEngine = class {
   }
   /** Registers a voice by its speaker latents, [125][512]. */
   addVoice(name, latents) {
-    if (latents.length !== PROMPT * H3)
+    if (latents.length !== PROMPT * H2)
       throw new Error(`Voice ${name} has ${latents.length} values`);
     this.voices.set(name, this.lm.voice(latents));
   }
@@ -2152,11 +1891,11 @@ async function cached(url) {
 }
 async function model(progress) {
   const cache = await openCache();
-  const hit = await cache?.match(MODEL_URL);
+  const hit = await cache?.match(WEIGHTS_URL);
   if (hit) return unpackModel(await hit.arrayBuffer());
-  const converted = convertCheckpoint((await download(CHECKPOINT_URL, progress)).buffer);
-  await keep(cache, MODEL_URL, packModel(converted));
-  return converted;
+  const bytes = await download(WEIGHTS_URL, progress);
+  await keep(cache, WEIGHTS_URL, bytes);
+  return unpackModel(bytes.buffer);
 }
 function parts(text, count) {
   if (count(text) <= TEXT_MAX) return [text];
@@ -2187,7 +1926,7 @@ var Phonon = class _Phonon {
     this.catalog = catalog;
     this.lost = lost;
   }
-  /** Loads the model: about 103 MB the first time, then 41 MB from the browser's cache.
+  /** Loads the model: a 43.7 MB download the first time, then the browser's cache.
    *  `progress` hears the download in percent. */
   static async load({ progress } = {}) {
     const gpu = navigator.gpu;

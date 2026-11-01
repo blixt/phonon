@@ -6,11 +6,10 @@ r = json.load(open(os.path.join(HERE, "..", "docs", "results.json")))
 NAMES = {"ours": "**blixt/phonon**", "gradiumWebgpu": "phonon-tts, WebGPU", "gradiumCpu": "phonon-tts, CPU", "kokoro": "Kokoro 82M, WebGPU"}
 def m(s, f="{:.0f}"):
     return f.format(s["median"]) if s else "did not finish"
-# First visits that a number would misstate: phonon-tts on the CPU loads the weights file that
-# phonon-tts on WebGPU downloaded just before it, and Safari's cache could not be cleared remotely.
-NOT_MEASURED = {("pc", "gradiumCpu"), ("mac", "gradiumCpu"), ("iphone", "gradiumCpu")}
+# A first visit that a number would misstate: phonon-tts on the CPU loads the weights file that
+# phonon-tts on WebGPU downloaded just before it.
 def first_visit(dev, rt, x):
-    if (dev, rt) in NOT_MEASURED or dev == "iphone": return "–"
+    if rt == "gradiumCpu": return "–"
     return m({"median": x["firstVisitMs"]["median"] / 1000} if x.get("firstVisitMs") else None, "{:.1f}")
 lines = ["| Device | Runtime | Speed (× real time) | First audio, warm (ms) | Cold start (ms) | First visit (s) | All 11 phrases, warm (s) |", "|---|---|--:|--:|--:|--:|--:|"]
 for dev, d in r["devices"].items():

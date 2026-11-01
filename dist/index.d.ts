@@ -33,7 +33,7 @@ export declare class Phonon {
     /** Settles when the GPU device is lost (a reset): load again to go on. */
     readonly lost: Promise<unknown>;
     private constructor();
-    /** Loads the model: about 103 MB the first time, then 41 MB from the browser's cache.
+    /** Loads the model: a 43.7 MB download the first time, then the browser's cache.
      *  `progress` hears the download in percent. */
     static load({ progress }?: {
         progress?: (percent: number) => void;

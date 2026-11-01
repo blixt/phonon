@@ -16,7 +16,8 @@
     "build": "esbuild src/index.ts --bundle --format=esm --target=es2022 --outfile=dist/phonon.js && esbuild demo/demo.ts --bundle --format=esm --target=es2022 --outfile=docs/demo.js && tsc -p tsconfig.build.json",
     "check": "tsc -p . --noEmit",
     "bench": "node bench/run.mjs",
-    "test": "esbuild src/*.test.ts --bundle --platform=node --format=esm --outdir=.test --log-level=warning && node --test .test/"
+    "test": "esbuild src/*.test.ts --bundle --platform=node --format=esm --outdir=.test --log-level=warning && node --test .test/",
+    "build-weights": "esbuild scripts/build-weights.ts --bundle --platform=node --format=esm --outfile=.test/build-weights.mjs --log-level=warning && node .test/build-weights.mjs"
   },
   "devDependencies": {
     "esbuild": "^0.28.2",

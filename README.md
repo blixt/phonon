@@ -2,21 +2,22 @@
 
 Fast text-to-speech in the browser, with a start and end time for every word.
 
-I wanted speech with word timings for an app that reads text aloud. The browser runtimes I tried were slower than I hoped and gave no timings, so I wrote a WebGPU engine for [Phonon 31M](https://huggingface.co/gradium/phonon-31m-en), an Apache-2.0 model by [Gradium](https://gradium.ai). Gradium did not make blixt/phonon. It loads Gradium's original weights from Hugging Face, converts the large matrices to 8-bit integers in the browser and keeps the result in the browser's cache. It makes 24 kHz English speech in any of Gradium's English voices, streams the audio as it goes, and returns the times of each word and token. You can set the speaking speed from about 0.77× to 1.3×.
+I wanted speech with word timings for an app that reads text aloud. The browser runtimes I tried were slower than I hoped and gave no timings, so I wrote a WebGPU engine for [Phonon 31M](https://huggingface.co/gradium/phonon-31m-en), an Apache-2.0 model by [Gradium](https://gradium.ai). Gradium did not make blixt/phonon. It downloads Gradium's weights with the large matrices converted to 8-bit integers (43.7 MB, [on Hugging Face](https://huggingface.co/blixt/phonon-31m-en-webgpu)) and keeps them in the browser's cache. It makes 24 kHz English speech in any of Gradium's English voices, streams the audio as it goes, and returns the times of each word and token. You can set the speaking speed from about 0.77× to 1.3×.
 
-[Try it in your browser](https://blixt.xyz/phonon/) (downloads about 103 MB the first time) · [Listen to the benchmark phrases](https://blixt.xyz/phonon/listen.html)
+[Try it in your browser](https://blixt.xyz/phonon/) (downloads 43.7 MB the first time) · [Listen to the benchmark phrases](https://blixt.xyz/phonon/listen.html)
 
 ## Why use it
 
 Compared with Gradium's own browser package, [phonon-tts](https://www.npmjs.com/package/phonon-tts), on WebGPU:
 
-- It makes speech 2 to 4 times faster: 115× real time against 31× on an M3 Max, 71× against 22× on an RTX 2080 Ti, and 26× against 12× on an iPhone 17 Pro.
-- The first audio of a sentence comes 3 to 5 times sooner: 3 ms against 15 ms on the M3 Max, and 11 ms against 43 ms on the iPhone.
-- A fresh page with the model cached speaks 4 to 7 times sooner: 44 ms against 320 ms on the M3 Max.
+- It makes speech 2 to 4 times faster: 115× real time against 31× on an M3 Max, 73× against 21× on an RTX 2080 Ti, and 26× against 13× on an iPhone 17 Pro.
+- The first audio of a sentence comes 4 to 5 times sooner: 3 ms against 15 ms on the M3 Max, and 11 ms against 44 ms on the iPhone.
+- A fresh page with the model cached speaks 4 to 8 times sooner: 46 ms against 373 ms on the M3 Max.
+- The first visit downloads 43.7 MB against 64.5 MB, and speaks sooner: 2.9 s against 3.5 s on the M3 Max, and 9.7 s against 18.2 s on the iPhone.
 - It gives the start and end time of every word, which phonon-tts does not.
 - The speech is as good: Whisper heard no word errors in 110 clips, the same speaker comes through, and the predicted quality (UTMOS) is 4.40 for both.
 
-The cost is a bigger first download: 103 MB against 64.5 MB, converted to 41 MB in the browser's cache. The first visit is 1.5 to 2 s slower. It runs in Chrome on macOS and Windows and in Safari on iOS. I have not tested Firefox or Android.
+It runs in Chrome on macOS and Windows and in Safari on iOS. I have not tested Firefox or Android.
 
 ## Results
 
@@ -29,21 +30,21 @@ The cost is a bigger first download: 103 MB against 64.5 MB, converted to 41 MB 
 <!-- results:start -->
 | Device | Runtime | Speed (× real time) | First audio, warm (ms) | Cold start (ms) | First visit (s) | All 11 phrases, warm (s) |
 |---|---|--:|--:|--:|--:|--:|
-| MacBook Pro, M3 Max | **blixt/phonon** | 115 | 3.2 | 44 | 4.9 | 0.4 |
-| MacBook Pro, M3 Max | phonon-tts, WebGPU | 31 | 15.2 | 320 | 3.4 | 1.9 |
-| MacBook Pro, M3 Max | phonon-tts, CPU | 15 | 9.8 | 275 | – | 4.0 |
-| MacBook Pro, M3 Max | Kokoro 82M, WebGPU | 14 | 206.0 | 804 | 12.1 | 4.1 |
-| PC, RTX 2080 Ti | **blixt/phonon** | 71 | 6.3 | 174 | 6.3 | 0.7 |
-| PC, RTX 2080 Ti | phonon-tts, WebGPU | 22 | 20.6 | 692 | 4.5 | 2.7 |
-| PC, RTX 2080 Ti | phonon-tts, CPU | 6 | 26.2 | 574 | – | 10.2 |
-| PC, RTX 2080 Ti | Kokoro 82M, WebGPU | 11 | 272.8 | 1982 | 14.1 | 5.1 |
-| iPhone 17 Pro, Safari 27.2 | **blixt/phonon** | 26 | 10.8 | 130 | – | 2.1 |
-| iPhone 17 Pro, Safari 27.2 | phonon-tts, WebGPU | 12 | 42.6 | 593 | – | 6.2 |
-| iPhone 17 Pro, Safari 27.2 | phonon-tts, CPU | 6 | 31.1 | 669 | – | 10.1 |
-| iPhone 17 Pro, Safari 27.2 | Kokoro 82M, WebGPU | did not finish | did not finish | did not finish | – | did not finish |
+| MacBook Pro, M3 Max | **blixt/phonon** | 115 | 3.2 | 46 | 2.9 | 0.4 |
+| MacBook Pro, M3 Max | phonon-tts, WebGPU | 31 | 14.9 | 373 | 3.5 | 1.8 |
+| MacBook Pro, M3 Max | phonon-tts, CPU | 15 | 9.8 | 324 | – | 3.9 |
+| MacBook Pro, M3 Max | Kokoro 82M, WebGPU | 14 | 207.4 | 847 | 12.0 | 4.1 |
+| PC, RTX 2080 Ti | **blixt/phonon** | 73 | 6.1 | 177 | 3.3 | 0.7 |
+| PC, RTX 2080 Ti | phonon-tts, WebGPU | 21 | 26.5 | 702 | 4.4 | 2.7 |
+| PC, RTX 2080 Ti | phonon-tts, CPU | 6 | 25.5 | 569 | – | 10.1 |
+| PC, RTX 2080 Ti | Kokoro 82M, WebGPU | 11 | 271.7 | 2022 | 15.5 | 5.2 |
+| iPhone 17 Pro, Safari 27.2 | **blixt/phonon** | 26 | 10.7 | 147 | 9.7 | 2.1 |
+| iPhone 17 Pro, Safari 27.2 | phonon-tts, WebGPU | 13 | 43.8 | 550 | 18.2 | 5.1 |
+| iPhone 17 Pro, Safari 27.2 | phonon-tts, CPU | 6 | 31.2 | 568 | – | 10.5 |
+| iPhone 17 Pro, Safari 27.2 | Kokoro 82M, WebGPU | did not finish | did not finish | did not finish | did not finish | did not finish |
 <!-- results:end -->
 
-Each value is a median, and the bars show the 25th and 75th percentiles. Speed is seconds of speech per second of compute, over every phrase of every warm run: 30× means that 10 seconds of speech take about a third of a second to make. Cold start is a fresh page that loads the runtime and speaks one sentence, with the files already in the browser's cache. First visit is the same with nothing cached, which includes the download from Hugging Face over the machine's normal internet connection. Kokoro's first audio is its whole first sentence, because the benchmark gives it one sentence per call. A dash in First visit means no clean number: phonon-tts on the CPU reads the weights file that phonon-tts on WebGPU downloaded just before it, and Safari's cache on the iPhone could not be cleared from a script.
+Each value is a median, and the bars show the 25th and 75th percentiles. Speed is seconds of speech per second of compute, over every phrase of every warm run: 30× means that 10 seconds of speech take about a third of a second to make. Cold start is a fresh page that loads the runtime and speaks one sentence, with the files already in the browser's cache. First visit is the same with nothing cached, which includes the download from Hugging Face over the machine's normal internet connection. Kokoro's first audio is its whole first sentence, because the benchmark gives it one sentence per call. phonon-tts on the CPU has no First visit: it reads the weights file that phonon-tts on WebGPU downloaded just before it.
 
 blixt/phonon gets faster as texts get longer, because each text has a fixed cost before its first frame. The other runtimes stay near one speed:
 
@@ -81,7 +82,7 @@ const speech = await tts.speak("The birch canoe slid on the smooth planks.", {
 // speech.tokens: the same for each token
 ```
 
-`Phonon.load` throws when the browser has no WebGPU. The first load downloads about 103 MB from Hugging Face, and later loads read 41 MB from the browser's cache.
+`Phonon.load` throws when the browser has no WebGPU. The first load downloads 43.7 MB from Hugging Face, and later loads read it from the browser's cache.
 
 The code is in [src](src): [kernels.ts](src/kernels.ts) has the WGSL shaders, [lm.ts](src/lm.ts) the language model, [codec.ts](src/codec.ts) the audio decoder, [engine.ts](src/engine.ts) the loop that drives them and [timing.ts](src/timing.ts) the word times.
 
@@ -97,7 +98,7 @@ The tokenizer must be `tokenizer.5.0.0.json`, not `tokenizer.json`. Only the fir
 
 ### Weights
 
-[checkpoint.ts](src/checkpoint.ts) converts `model.safetensors` (the language model in bf16, the codec decoder in f32) in the browser. It does not use the GGUF file.
+[scripts/build-weights.ts](scripts/build-weights.ts) converts Gradium's `model.safetensors` (the language model in bf16, the codec decoder in f32) once, with [checkpoint.ts](src/checkpoint.ts), into the file the library downloads from [blixt/phonon-31m-en-webgpu](https://huggingface.co/blixt/phonon-31m-en-webgpu). It does not use the GGUF file.
 
 - The checkpoint stores rotary pairs interleaved (dims 2j and 2j+1). The converter moves the rows of q and k to halves (j and j+32) in each head, so a kernel rotates with two contiguous reads.
 - The flow head does one LSD step, from time 0 to time 1. Its time embedding is the same at every step, and the converter adds it once to the bias of `cond_embed`.
@@ -106,7 +107,7 @@ The tokenizer must be `tokenizer.5.0.0.json`, not `tokenizer.json`. Only the fir
 - Convolution weights become [out][tap][in]. Transposed convolutions have kernel = 2 × stride, and each becomes one GEMM per output phase, [out][phase][tap][in], in which a kernel gathers its inputs and never scatters.
 - Every tensor with 16,384 values or more becomes int8, with one f16 scale per 32 values along its rows. The scale is max |value| / 127 after rounding the values to f16, and quantized values round half to even. Other tensors stay f16. Shaders read the whole blob as `u32` words and unpack with `unpack4xI8` and `unpack2x16float`, and all arithmetic is f32, which means no shader needs the `shader-f16` feature.
 - On the 110 warm clips per runtime of the benchmark, Whisper large-v3-turbo found no word errors in blixt/phonon's speech (95% interval 0 to 0%), against 0.22% (0 to 0.54%) for phonon-tts on WebGPU. The paired difference is −0.22 points (−0.53 to 0). WavLM speaker embeddings of blixt/phonon's clips are as close to phonon-tts's clips of the same text (cosine 0.988) as phonon-tts's clips are to each other across seeds (0.989). UTMOS predicts 4.40 for both. Nobody has run a listening test.
-- The browser keeps the converted model (41 MB), not the 103 MB checkpoint. Conversion takes about 0.6 s, and a load from the cache skips it.
+- The file is 43.7 MB, against 103 MB for the checkpoint and 64.5 MB for Gradium's GGUF file. `npm run build-weights` rebuilds it byte for byte, and its model card gives the SHA-256.
 
 ### Speed
 
@@ -206,6 +207,6 @@ python bench/plots.py && python bench/table.py      # figures and table
 
 ## Credits and license
 
-The model, its tokenizer and its voices are by [Gradium](https://gradium.ai), under the Apache License 2.0. Phonon builds on [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) and the Mimi codec by [Kyutai](https://kyutai.org). This repository does not include the model. The code downloads it from Hugging Face at a pinned revision.
+The model, its tokenizer and its voices are by [Gradium](https://gradium.ai), under the Apache License 2.0. Phonon builds on [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) and the Mimi codec by [Kyutai](https://kyutai.org). This repository does not include the model. The code downloads Gradium's tokenizer and voices from Hugging Face at pinned revisions, and the converted weights from [blixt/phonon-31m-en-webgpu](https://huggingface.co/blixt/phonon-31m-en-webgpu), which credits Gradium.
 
 The code in this repository is under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE).

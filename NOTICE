@@ -7,7 +7,8 @@ endorsed by Gradium.
 The model, its tokenizer and its voice catalog are by Gradium (https://gradium.ai), under the
 Apache License 2.0: https://huggingface.co/gradium/phonon-31m-en and
 https://huggingface.co/gradium/phonon-voices. This repository does not include them. The code
-downloads them from Hugging Face at pinned revisions.
+downloads the tokenizer and voices from Hugging Face at pinned revisions, and the weights
+converted by scripts/build-weights.ts from https://huggingface.co/blixt/phonon-31m-en-webgpu.
 
 Phonon builds on Pocket TTS and the Mimi codec by Kyutai (https://kyutai.org).
 

@@ -21,5 +21,10 @@ page.on("crash", () => console.log("[crash]"));
 page.on("console", (m) => console.log(`[${m.type()}]`, m.text().slice(0, 300)));
 page.on("requestfailed", (r) => console.log("[failed]", r.url().slice(0, 120), r.failure()?.errorText));
 await page.goto(url);
-await page.waitForFunction(() => document.getElementById("task")?.textContent?.startsWith("Done"), null, { timeout: 0, polling: 2000 });
+// The page reloads itself between runs: read its status every 2 s, through the reloads.
+for (;;) {
+  const status = await page.textContent("#task", { timeout: 5000 }).catch(() => "");
+  if (status?.startsWith("Done")) break;
+  await new Promise((r) => setTimeout(r, 2000));
+}
 await (remote ? page.close() : ctx.close());

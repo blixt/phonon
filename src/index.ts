@@ -2,13 +2,11 @@
 // in any English voice of Gradium's catalog, with the time of every word.
 // The model's files (files.ts) stay in the browser's cache once downloaded.
 import {
-  convertCheckpoint,
-  packModel,
   readVoice,
   unpackModel,
   type PhononModel,
 } from "./checkpoint";
-import { CATALOG_URL, CHECKPOINT_URL, MODEL_CACHE, MODEL_URL, TOKENIZER_URL, voiceUrl } from "./files";
+import { CATALOG_URL, MODEL_CACHE, TOKENIZER_URL, WEIGHTS_URL, voiceUrl } from "./files";
 import { PhononEngine, TEXT_MAX } from "./engine";
 import { paceForSpeed } from "./pace";
 import { SAMPLE_RATE, spans, type Span } from "./timing";
@@ -70,11 +68,11 @@ async function cached(url: string): Promise<ArrayBuffer> {
  *  converted and kept in place of the checkpoint. */
 async function model(progress: (percent: number) => void): Promise<PhononModel> {
   const cache = await openCache();
-  const hit = await cache?.match(MODEL_URL);
+  const hit = await cache?.match(WEIGHTS_URL);
   if (hit) return unpackModel(await hit.arrayBuffer());
-  const converted = convertCheckpoint((await download(CHECKPOINT_URL, progress)).buffer);
-  await keep(cache, MODEL_URL, packModel(converted));
-  return converted;
+  const bytes = await download(WEIGHTS_URL, progress);
+  await keep(cache, WEIGHTS_URL, bytes);
+  return unpackModel(bytes.buffer);
 }
 
 /** Text cut where it must be so each part fits the model's text window:
@@ -141,7 +139,7 @@ export class Phonon {
     this.lost = lost;
   }
 
-  /** Loads the model: about 103 MB the first time, then 41 MB from the browser's cache.
+  /** Loads the model: a 43.7 MB download the first time, then the browser's cache.
    *  `progress` hears the download in percent. */
   static async load({ progress }: { progress?: (percent: number) => void } = {}): Promise<Phonon> {
     const gpu = (navigator as Navigator & { gpu?: GPU }).gpu;
