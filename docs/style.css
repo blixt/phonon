@@ -61,9 +61,8 @@ button, select, textarea, input { font: inherit; color: inherit; }
 
 /* First screen */
 .hero h1 { font-size: clamp(27px, 3.2vw, 38px); line-height: 1.15; font-weight: 650; letter-spacing: -0.018em; margin: 4px 0 8px; max-width: 30ch; text-wrap: balance; }
-.meta { display: flex; flex-wrap: wrap; color: var(--muted); font-size: 15px; margin: 0 0 22px; }
+.meta { display: flex; flex-wrap: wrap; gap: 2px 18px; color: var(--muted); font-size: 15px; margin: 0 0 22px; }
 .meta span { white-space: nowrap; }
-.meta span + span::before { content: "·"; margin: 0 8px; }
 .grid { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: 20px; align-items: stretch; }
 @media (max-width: 960px) { .grid { grid-template-columns: minmax(0, 1fr); } }
 .card { background: var(--raised); border: 1px solid var(--line); border-radius: 16px; padding: 20px; min-width: 0; }
@@ -86,6 +85,11 @@ button, select, textarea, input { font: inherit; color: inherit; }
   padding: 9px 22px; cursor: pointer; min-width: 112px;
 }
 @media (prefers-color-scheme: dark) { .speak { color: #2a1210; } }
+@media (max-width: 520px) {
+  .controls select { width: 7.5em; }
+  .controls input[type="range"] { width: 84px; }
+  .speak { flex: 1 0 100%; margin-left: 0; padding: 11px; }
+}
 .speak:disabled { opacity: 0.5; cursor: default; }
 .words { flex: 1; min-height: 5.6em; margin: 0; color: var(--ink2); line-height: 1.7; border: 1px dashed var(--line); border-radius: 10px; padding: 10px 12px; font-size: 17px; }
 .words.empty { color: var(--muted); font-size: 15px; display: flex; align-items: center; justify-content: center; text-align: center; }
