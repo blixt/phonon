@@ -2,22 +2,26 @@
 
 Fast text-to-speech in the browser, with a start and end time for every word.
 
-I wanted speech with word timings for an app that reads text aloud. The browser runtimes I tried were slower than I hoped and gave no timings, so I wrote a WebGPU engine for [Phonon 31M](https://huggingface.co/gradium/phonon-31m-en), an Apache-2.0 model by [Gradium](https://gradium.ai). Gradium did not make blixt/phonon. It downloads Gradium's weights with the large matrices converted to 8-bit integers (43.7 MB, [on Hugging Face](https://huggingface.co/blixt/phonon-31m-en-webgpu)) and keeps them in the browser's cache. It makes 24 kHz English speech in any of Gradium's English voices, streams the audio as it goes, and returns the times of each word and token. You can set the speaking speed from about 0.77× to 1.3×.
-
 [Try it in your browser](https://blixt.xyz/phonon/) (downloads 43.7 MB the first time) · [Listen to the benchmark phrases](https://blixt.xyz/phonon/listen.html)
 
-## Why use it
+## What it does
 
-Compared with Gradium's own browser package, [phonon-tts](https://www.npmjs.com/package/phonon-tts), on WebGPU:
+blixt/phonon is a WebGPU runtime for [Phonon 31M](https://huggingface.co/gradium/phonon-31m-en), an Apache-2.0 text-to-speech model by [Gradium](https://gradium.ai). Gradium did not make blixt/phonon.
 
-- It makes speech 2 to 4 times faster: 115× real time against 31× on an M3 Max, 73× against 21× on an RTX 2080 Ti, and 26× against 13× on an iPhone 17 Pro.
-- The first audio of a sentence comes 4 to 5 times sooner: 3 ms against 15 ms on the M3 Max, and 11 ms against 44 ms on the iPhone.
-- A fresh page with the model cached speaks 4 to 8 times sooner: 46 ms against 373 ms on the M3 Max.
-- The first visit downloads 43.7 MB against 64.5 MB, and speaks sooner: 2.9 s against 3.5 s on the M3 Max, and 9.7 s against 18.2 s on the iPhone.
-- It gives the start and end time of every word, which phonon-tts does not.
-- The speech is as good: Whisper heard no word errors in 110 clips, the same speaker comes through, and the predicted quality (UTMOS) is 4.40 for both.
+- It makes 24 kHz English speech in any of Gradium's English voices, and streams the audio as it goes.
+- It returns the start and end time of every word and token.
+- The speaking speed goes from about 0.77× to 1.3×.
+- It downloads Gradium's weights with the large matrices converted to 8-bit integers (43.7 MB, [on Hugging Face](https://huggingface.co/blixt/phonon-31m-en-webgpu)) and keeps them in the browser's cache.
+- It runs in Chrome on macOS and Windows and in Safari on iOS. Firefox and Android are not tested.
 
-It runs in Chrome on macOS and Windows and in Safari on iOS. I have not tested Firefox or Android.
+Against Gradium's own browser package, [phonon-tts](https://www.npmjs.com/package/phonon-tts), on WebGPU:
+
+- Speed: 115× real time against 31× on an M3 Max, 73× against 21× on an RTX 2080 Ti, and 26× against 13× on an iPhone 17 Pro.
+- First audio of a sentence: 3 ms against 15 ms on the M3 Max, and 11 ms against 44 ms on the iPhone.
+- A fresh page with the model cached: first audio after 46 ms against 373 ms on the M3 Max.
+- First visit: 43.7 MB to download against 64.5 MB. First audio after 2.9 s against 3.5 s on the M3 Max, and 9.7 s against 18.2 s on the iPhone.
+- Word times: phonon-tts gives none.
+- Speech quality: Whisper heard no word errors in 110 clips, against 0.22% for phonon-tts. Speaker similarity is the same, and UTMOS predicts 4.40 for both.
 
 ## Results
 
