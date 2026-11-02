@@ -25,28 +25,24 @@
   <h1>{{tagline}}</h1>
   <div class="grid">
     <section class="card demo" id="demo" aria-label="Try it">
-      <textarea id="text" aria-label="Text to speak">The birch canoe slid on the smooth planks. Glue the sheet to the dark blue background.</textarea>
+      <div class="field">
+        <textarea id="text" aria-label="Text to speak">The birch canoe slid on the smooth planks. Glue the sheet to the dark blue background.</textarea>
+        <p class="words" id="words" aria-live="off"></p>
+      </div>
       <div class="controls">
         <select id="voice" aria-label="Voice"><option>Delia</option></select>
         <label>Speed <input id="speed" type="range" min="0.8" max="1.3" step="0.05" value="1" /><output id="speed-out">1.0×</output></label>
         <button class="speak" id="speak">Speak</button>
       </div>
-      <p class="words empty" id="words"></p>
       <div class="stats">
         <div class="stat" id="s-load"><b>43.7 MB</b><span>download</span></div>
         <div class="stat" id="s-first"><b>–</b><span>first audio</span></div>
         <div class="stat" id="s-speed"><b>–</b><span>real time</span></div>
         <div class="stat" id="s-audio"><b>–</b><span>speech made</span></div>
       </div>
-      <p class="device" id="device"></p>
+      <p class="device" id="device">&nbsp;</p>
     </section>
-    <section class="card bench" aria-label="Benchmarks">
-      <div class="tabs" role="tablist" id="metric"></div>
-      <p class="caption" id="metric-caption"></p>
-      <div class="chart" id="bars"></div>
-      <ul class="legend" id="bars-legend"></ul>
-      <p class="note">Medians of 10 rounds per device. Whiskers: 25th to 75th percentile. <a href="#results">All results</a></p>
-    </section>
+    <section class="card bench" id="bars" aria-label="Benchmarks">{{bars}}</section>
   </div>
 </section>
 <div class="docs wrap">

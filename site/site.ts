@@ -1,40 +1,8 @@
-// The web page: the demo with its live numbers, and the benchmark's charts drawn from
-// docs/results.json (bench/plots.py).
+// The web page's script: it draws the charts into the boxes the build wrote (frames.ts), and
+// runs the demo with its live numbers. Nothing here changes a box's size.
 import { Phonon, type Speech } from "../src/index";
 import { MODEL_CACHE, WEIGHTS_URL } from "../src/files";
-import results from "../docs/results.json";
-import phrases from "../bench/phrases.json";
-
-type Stat = { median: number; p25: number; p75: number; n: number } | null;
-type Metric = "warmRealtime" | "warmFirstMs" | "coldStartMs" | "firstVisitMs";
-type RuntimeResult = { errors: string[] } & Record<Metric, Stat>;
-const RESULTS = results.results as unknown as Record<string, Record<string, RuntimeResult>>;
-const PHRASES = (results as unknown as { phrases: Record<string, Record<string, [number, number, string][]>> }).phrases;
-const TIMING = (results as unknown as { timing: { errorsMs: number[]; words: number; medianMs: number; medianSignedMs: number; within100ms: number } }).timing;
-const QUALITY = (results as unknown as { quality: { clips: Record<string, number>; wer: Record<string, number[]>; utmos: Record<string, number[]> } }).quality;
-
-const RUNTIMES = [
-  { id: "ours", name: "blixt/phonon" },
-  { id: "gradiumWebgpu", name: "phonon-tts WebGPU" },
-  { id: "gradiumCpu", name: "phonon-tts CPU" },
-  { id: "kokoro", name: "Kokoro 82M" },
-];
-const DEVICES = [
-  { id: "mac", name: "M3 Max", full: "MacBook Pro, M3 Max, Chrome" },
-  { id: "pc", name: "RTX 2080 Ti", full: "PC, RTX 2080 Ti, Chrome" },
-  { id: "iphone", name: "iPhone 17 Pro", full: "iPhone 17 Pro, Safari" },
-];
-const METRICS: { id: Metric; tab: string; caption: string; unit: "x" | "ms" }[] = [
-  { id: "warmRealtime", tab: "Speed", caption: "Seconds of speech per second of compute, warm.", unit: "x" },
-  { id: "warmFirstMs", tab: "First audio", caption: "From the call to the first chunk of audio, warm.", unit: "ms" },
-  { id: "coldStartMs", tab: "Cold start", caption: "A fresh page loads the runtime and speaks one sentence, with the files cached.", unit: "ms" },
-  {
-    id: "firstVisitMs",
-    tab: "First visit",
-    caption: "A fresh page with nothing cached. Downloads 43.7 MB, 64.5 MB (phonon-tts) or 326 MB (Kokoro).",
-    unit: "ms",
-  },
-];
+import { DEVICES, METRICS, PHRASES, QUALITY, RESULTS, RUNTIMES, TEXTS, TIMING, fmt, ms, short, type Metric, type Stat } from "./data";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const SVG = "http://www.w3.org/2000/svg";
@@ -44,8 +12,6 @@ function el<K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string, 
   parent?.append(e);
   return e;
 }
-const ms = (v: number) => (v >= 1000 ? `${(v / 1000).toFixed(1)} s` : v >= 10 ? `${Math.round(v)} ms` : `${v.toFixed(1)} ms`);
-const fmt = (v: number, unit: "x" | "ms") => (unit === "x" ? `${Math.round(v)}×` : ms(v));
 
 /** A tooltip for one chart, placed in the chart's own box. */
 function tooltip(box: HTMLElement) {
@@ -65,41 +31,59 @@ function tooltip(box: HTMLElement) {
   };
 }
 
-/** Redraws `draw` into `box` at its width, now and whenever the width changes. */
-function responsive(box: HTMLElement, draw: (width: number) => void) {
-  let last = 0;
-  const run = () => {
-    const w = Math.round(box.clientWidth);
-    if (w && w !== last) draw((last = w));
+/** Redraws `draw` into `box` at the size its CSS gives it, now and whenever that changes. */
+function responsive(box: HTMLElement, draw: (width: number, height: number) => void) {
+  let last = "";
+  const run = (force = false) => {
+    const w = Math.round(box.clientWidth), h = Math.round(box.clientHeight);
+    if (w && h && (force || `${w}x${h}` !== last)) {
+      last = `${w}x${h}`;
+      box.querySelector("svg")?.remove();
+      draw(w, h);
+    }
   };
-  new ResizeObserver(run).observe(box);
+  new ResizeObserver(() => run()).observe(box);
   run();
-  return () => {
-    last = 0;
-    run();
-  };
+  return () => run(true);
 }
 
-function legend(list: HTMLElement, ids: string[], toggle?: (id: string, on: boolean) => void) {
-  list.replaceChildren(
-    ...RUNTIMES.filter((r) => ids.includes(r.id)).map((r) => {
-      const li = document.createElement("li");
-      const swatch = `<i class="s-${r.id}"></i>${r.name}`;
-      if (!toggle) li.innerHTML = swatch;
-      else {
-        const b = document.createElement("button");
-        b.innerHTML = swatch;
-        b.setAttribute("aria-pressed", "true");
-        b.onclick = () => {
-          const on = b.getAttribute("aria-pressed") !== "true";
-          b.setAttribute("aria-pressed", String(on));
-          toggle(r.id, on);
-        };
-        li.append(b);
-      }
-      return li;
-    }),
-  );
+/** Tabs and their captions from frames.ts: selecting a tab shows its caption. */
+function wireTabs(box: HTMLElement, select: (i: number) => void) {
+  const buttons = [...box.querySelectorAll<HTMLButtonElement>(".tabs button")];
+  const captions = box.querySelectorAll(".captions .caption");
+  buttons.forEach((b, i) => {
+    b.onclick = () => {
+      buttons.forEach((t) => t.setAttribute("aria-selected", String(t === b)));
+      if (captions.length > 1) captions.forEach((c, j) => c.classList.toggle("off", j !== i));
+      select(i);
+    };
+  });
+}
+
+/** Value labels that fit: each stays inside the chart, and one that would touch another label
+ *  or another bar is left out (its bar's tooltip still has it). blixt/phonon's labels always
+ *  stay, on top of everything, with a halo where they cross a bar. */
+function fitLabels(svg: SVGSVGElement, W: number) {
+  const touches = (a: DOMRect, b: DOMRect) => a.x < b.x + b.width + 1 && b.x < a.x + a.width + 1 && a.y < b.y + b.height && b.y < a.y + a.height;
+  const bars = [...svg.querySelectorAll<SVGRectElement>("rect.bar, rect.dnf")].map((r) => ({ g: r.parentElement, b: r.getBBox() }));
+  const labels = [...svg.querySelectorAll<SVGTextElement>("text.val")];
+  const ours = (t: SVGTextElement) => !!t.parentElement!.querySelector(".s-ours");
+  labels.sort((a, b) => Number(ours(b)) - Number(ours(a)));
+  const placed: DOMRect[] = [];
+  for (const t of labels) {
+    let b = t.getBBox();
+    const shift = b.x < 0 ? -b.x : b.x + b.width > W ? W - b.x - b.width : 0;
+    if (shift) {
+      t.setAttribute("x", String(Number(t.getAttribute("x")) + shift));
+      b = t.getBBox();
+    }
+    if (ours(t)) svg.append(t);
+    else if (placed.some((p) => touches(b, p)) || bars.some((r) => r.g !== t.parentElement && touches(b, r.b))) {
+      t.remove();
+      continue;
+    }
+    placed.push(b);
+  }
 }
 
 // ---- The first screen's chart: one metric per tab, grouped by device. ----
@@ -107,32 +91,19 @@ function legend(list: HTMLElement, ids: string[], toggle?: (id: string, on: bool
 /** What this page measured, shown as its own group once the demo has spoken. */
 const mine: Partial<Record<Metric, number>> = {};
 
-function barChart() {
-  const box = $("bars");
+function barChart(frame: HTMLElement) {
+  const box = frame.querySelector<HTMLElement>("[data-plot]")!;
   const tip = tooltip(box);
   let metric = METRICS[0];
-  const tabs = $("metric");
-  for (const m of METRICS) {
-    const b = document.createElement("button");
-    b.role = "tab";
-    b.textContent = m.tab;
-    b.onclick = () => {
-      metric = m;
-      for (const t of tabs.children) t.setAttribute("aria-selected", String(t === b));
-      $("metric-caption").textContent = m.caption;
-      redraw();
-    };
-    tabs.append(b);
-  }
-  tabs.children[0].setAttribute("aria-selected", "true");
-  $("metric-caption").textContent = metric.caption;
-  legend($("bars-legend"), RUNTIMES.map((r) => r.id));
+  wireTabs(frame, (i) => {
+    metric = METRICS[i];
+    redraw();
+  });
 
-  const draw = (W: number) => {
-    const groups = [...DEVICES.map((d) => ({ id: d.id, name: d.name, full: d.full, you: false }))];
+  const draw = (W: number, H: number) => {
+    const groups = [...DEVICES.map((d) => ({ id: d.id, name: d.name, short: d.short, full: d.full, you: false }))];
     const own = mine[metric.id];
-    if (own) groups.push({ id: "you", name: "This device", full: "This device", you: true });
-    const H = Math.round(Math.min(310, Math.max(250, W * 0.62)));
+    if (own) groups.push({ id: "you", name: "This device", short: "This device", full: "This device", you: true });
     const top = 26, bottom = 36;
     const stat = (g: string, r: string): Stat =>
       g === "you" ? (r === "ours" && own ? { median: own, p25: own, p75: own, n: 1 } : null) : (RESULTS[g]?.[r]?.[metric.id] ?? null);
@@ -142,9 +113,11 @@ function barChart() {
     const y = (v: number) => top + (H - top - bottom) * (1 - Math.log(v / lo) / Math.log(hi / lo));
     const base = H - bottom;
     const gap = W < 480 ? 14 : 26;
-    const slots = groups.reduce((n, g) => n + (g.you ? 1 : RUNTIMES.length), 0);
-    const bw = Math.min(54, (W - gap * (groups.length - 1)) / slots - 4);
-    const groupW = (g: (typeof groups)[0]) => (g.you ? 1 : RUNTIMES.length) * (bw + 4) - 4;
+    // This device's group is one bar, but as wide as its label.
+    const youW = own ? 80 : 0;
+    const devices = groups.length - (own ? 1 : 0);
+    const bw = Math.min(54, (W - youW - gap * (groups.length - 1)) / (devices * RUNTIMES.length) - 4);
+    const groupW = (g: (typeof groups)[0]) => (g.you ? youW : RUNTIMES.length * (bw + 4) - 4);
     const total = groups.reduce((n, g) => n + groupW(g), 0) + gap * (groups.length - 1);
     const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": `${metric.tab} by device` });
     let x = (W - total) / 2;
@@ -154,7 +127,7 @@ function barChart() {
       const runtimes = g.you ? RUNTIMES.slice(0, 1) : RUNTIMES;
       runtimes.forEach((r, i) => {
         const s = stat(g.id, r.id);
-        const bx = x + i * (bw + 4);
+        const bx = g.you ? x + youW - bw : x + i * (bw + 4);
         const cx = bx + bw / 2;
         const failed = !s && !!RESULTS[g.id]?.[r.id]?.errors?.length;
         const hit = el("g", {}, svg);
@@ -164,8 +137,7 @@ function barChart() {
             el("line", { class: "whisker", x1: cx, x2: cx, y1: y(s.p25), y2: y(s.p75) }, hit);
             for (const v of [s.p25, s.p75]) el("line", { class: "whisker", x1: cx - 4, x2: cx + 4, y1: y(v), y2: y(v) }, hit);
           }
-          if (bw >= 34 || r.id === "ours")
-            el("text", { class: "val", x: cx, y: Math.min(y(s.median), y(s.p75)) - 7, "text-anchor": "middle" }, hit).textContent = fmt(s.median, metric.unit);
+          el("text", { class: "val", x: cx, y: Math.min(y(s.median), y(s.p75)) - 7, "text-anchor": "middle" }, hit).textContent = short(s.median, metric.unit);
         } else if (failed) {
           el("rect", { class: "dnf", x: bx + 0.6, y: y(groupMax), width: bw - 1.2, height: base - y(groupMax), rx: 4 }, hit);
         } else {
@@ -182,12 +154,12 @@ function barChart() {
           tip.show(`${r.name} · ${g.full}<br>${label}${extra}`, cx, s ? Math.min(y(s.median), y(s.p75)) - 18 : base - 30);
         hit.onpointerleave = () => tip.hide();
       });
-      el("text", { class: g.you ? "group you" : "group", x: g.you ? x + gw : x + gw / 2, y: H - 10, "text-anchor": g.you ? "end" : "middle" }, svg).textContent = g.name;
+      el("text", { class: g.you ? "group you" : "group", x: g.you ? x + gw : x + gw / 2, y: H - 10, "text-anchor": g.you ? "end" : "middle" }, svg).textContent = gw < 92 ? g.short : g.name;
       x += gw + gap;
     }
     el("line", { class: "axis", x1: 0, x2: W, y1: base, y2: base }, svg);
-    box.querySelector("svg")?.remove();
     box.prepend(svg);
+    fitLabels(svg, W);
   };
   const redraw = responsive(box, draw);
   return redraw;
@@ -195,28 +167,26 @@ function barChart() {
 
 // ---- Charts in the README's sections. ----
 
-function lengthChart(box: HTMLElement) {
-  box.innerHTML = `<p class="caption">Each dot is one warm phrase. Log scales.</p><div class="tabs" role="tablist"></div><div class="chart"></div><ul class="legend"></ul>`;
-  const plot = box.querySelector<HTMLElement>(".chart")!;
-  const tabs = box.querySelector<HTMLElement>(".tabs")!;
+function lengthChart(frame: HTMLElement) {
+  const plot = frame.querySelector<HTMLElement>("[data-plot]")!;
   const tip = tooltip(plot);
   const hidden = new Set<string>();
   let device = DEVICES[0];
-  for (const d of DEVICES) {
-    const b = document.createElement("button");
-    b.role = "tab";
-    b.textContent = d.name;
-    b.setAttribute("aria-selected", String(d === device));
+  wireTabs(frame, (i) => {
+    device = DEVICES[i];
+    redraw();
+  });
+  for (const b of frame.querySelectorAll<HTMLButtonElement>(".legend button")) {
     b.onclick = () => {
-      device = d;
-      for (const t of tabs.children) t.setAttribute("aria-selected", String(t === b));
+      const on = b.getAttribute("aria-pressed") !== "true";
+      b.setAttribute("aria-pressed", String(on));
+      if (on) hidden.delete(b.dataset.runtime!);
+      else hidden.add(b.dataset.runtime!);
       redraw();
     };
-    tabs.append(b);
   }
-  const text = Object.fromEntries(phrases.phrases.map((p) => [p.id, p.text]));
-  const draw = (W: number) => {
-    const H = Math.round(Math.min(360, Math.max(240, W * 0.5)));
+  const text = Object.fromEntries(TEXTS.map((p) => [p.id, p.text]));
+  const draw = (W: number, H: number) => {
     const L = 40, R = 10, T = 8, B = 30;
     const x = (v: number) => L + ((W - L - R) * Math.log(v / 1.5)) / Math.log(45 / 1.5);
     const y = (v: number) => T + (H - T - B) * (1 - Math.log(v / 3) / Math.log(260 / 3));
@@ -257,21 +227,14 @@ function lengthChart(box: HTMLElement) {
       tip.show(`<b>${Math.round(best.speed)}×</b> · ${best.rt}<br>${best.secs.toFixed(1)} s: “${words.length > 44 ? `${words.slice(0, 42)}…` : words}”`, (best.px / W) * plot.clientWidth, (best.py / H) * plot.clientHeight - 8);
     };
     svg.onpointerleave = () => (tip.hide(), ring.setAttribute("visibility", "hidden"));
-    plot.querySelector("svg")?.remove();
     plot.prepend(svg);
   };
   const redraw = responsive(plot, draw);
-  legend(box.querySelector(".legend")!, RUNTIMES.map((r) => r.id), (id, on) => {
-    if (on) hidden.delete(id);
-    else hidden.add(id);
-    redraw();
-  });
 }
 
-function timingChart(box: HTMLElement) {
+function timingChart(frame: HTMLElement) {
   const t = TIMING;
-  box.innerHTML = `<p class="caption">${t.words} words, 4 voices. Median absolute error ${Math.round(t.medianMs)} ms, ${Math.round(t.within100ms * 100)}% within 100 ms.</p><div class="chart"></div>`;
-  const plot = box.querySelector<HTMLElement>(".chart")!;
+  const plot = frame.querySelector<HTMLElement>("[data-plot]")!;
   const tip = tooltip(plot);
   const bins = new Map<number, number>();
   for (const e of t.errorsMs) {
@@ -279,8 +242,7 @@ function timingChart(box: HTMLElement) {
     bins.set(b, (bins.get(b) ?? 0) + 1);
   }
   const most = Math.max(...bins.values());
-  responsive(plot, (W) => {
-    const H = Math.round(Math.min(240, Math.max(180, W * 0.32)));
+  responsive(plot, (W, H) => {
     const L = 8, R = 8, T = 30, B = 30;
     const x = (v: number) => L + ((W - L - R) * (v + 300)) / 600;
     const y = (n: number) => T + (H - T - B) * (1 - n / most);
@@ -294,32 +256,30 @@ function timingChart(box: HTMLElement) {
         tip.show(`<b>${n} words</b><br>${b > 0 ? "+" : ""}${b} to ${b + 20 > 0 ? "+" : ""}${b + 20} ms`, (x(b + 10) / W) * plot.clientWidth, (y(n) / H) * plot.clientHeight - 8);
       g.onpointerleave = () => tip.hide();
     }
-    for (const v of [-300, -200, -100, 0, 100, 200, 300])
+    for (const v of W < 520 ? [-200, 0, 200] : [-300, -200, -100, 0, 100, 200, 300])
       el("text", { x: x(v), y: H - 10, "text-anchor": v === -300 ? "start" : v === 300 ? "end" : "middle" }, svg).textContent = `${v > 0 ? "+" : ""}${v} ms`;
     const m = t.medianSignedMs;
     el("line", { class: "median", x1: x(m), x2: x(m), y1: T - 12, y2: H - B }, svg);
     el("text", { x: x(m) + 6, y: T - 16 }, svg).textContent = `median ${m > 0 ? "+" : ""}${Math.round(m)} ms (later)`;
     el("line", { class: "axis", x1: L, x2: W - R, y1: H - B, y2: H - B }, svg);
-    plot.querySelector("svg")?.remove();
     plot.prepend(svg);
   });
 }
 
-function qualityChart(box: HTMLElement) {
+function qualityChart(frame: HTMLElement) {
   const q = QUALITY;
-  box.innerHTML = `<p class="caption">Lines show 95% intervals.</p><div class="chart"></div>`;
-  const plot = box.querySelector<HTMLElement>(".chart")!;
+  const plot = frame.querySelector<HTMLElement>("[data-plot]")!;
   const tip = tooltip(plot);
   const panels = [
     { key: "wer" as const, title: "Word errors (Whisper)", max: 2, f: (v: number) => `${(v * 100).toFixed(2)}%`, scale: 100 },
     { key: "utmos" as const, title: "Predicted quality (UTMOS)", max: 5, f: (v: number) => v.toFixed(2), scale: 1 },
   ];
-  responsive(plot, (W) => {
+  responsive(plot, (W, H) => {
+    // Two panels side by side from 560 px, as the CSS sizes the box.
     const two = W >= 560;
     const PW = two ? (W - 24) / 2 : W;
     const row = 30, labelW = Math.min(150, PW * 0.42);
     const PH = 26 + RUNTIMES.length * row;
-    const H = two ? PH : PH * 2 + 16;
     const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Word error rate and UTMOS per runtime" });
     panels.forEach((p, i) => {
       const ox = two ? i * (PW + 24) : 0, oy = two ? 0 : i * (PH + 16);
@@ -340,17 +300,12 @@ function qualityChart(box: HTMLElement) {
         g.onpointerleave = () => tip.hide();
       });
     });
-    plot.querySelector("svg")?.remove();
     plot.prepend(svg);
   });
 }
 
 function listenPlayers(box: HTMLElement) {
-  const select = document.createElement("select");
-  select.setAttribute("aria-label", "Phrase");
-  for (const p of phrases.phrases) select.add(new Option(p.text.length > 90 ? `${p.text.slice(0, 88)}…` : p.text, p.id));
-  const players = document.createElement("div");
-  players.className = "players";
+  const select = box.querySelector("select")!;
   const audio = new Audio();
   let playing: HTMLButtonElement | null = null;
   const stop = () => {
@@ -359,24 +314,18 @@ function listenPlayers(box: HTMLElement) {
     playing = null;
   };
   audio.onended = stop;
-  const notes: Record<string, string> = { ours: "WebGPU", gradiumWebgpu: "WebGPU", gradiumCpu: "CPU", kokoro: "different model" };
-  for (const r of RUNTIMES) {
-    const b = document.createElement("button");
-    b.setAttribute("aria-pressed", "false");
-    b.innerHTML = `<i class="s-${r.id}"></i><span>${r.name.replace(/ (WebGPU|CPU)$/, "")}<small>${notes[r.id]}</small></span>`;
+  for (const b of box.querySelectorAll<HTMLButtonElement>(".players button")) {
     b.onclick = () => {
       const again = playing === b;
       stop();
       if (again) return;
-      audio.src = `audio/${r.id}/${select.value}.mp3`;
+      audio.src = `audio/${b.dataset.runtime}/${select.value}.mp3`;
       void audio.play();
       playing = b;
       b.setAttribute("aria-pressed", "true");
     };
-    players.append(b);
   }
   select.onchange = stop;
-  box.append(select, players);
 }
 
 // ---- The demo. ----
@@ -396,7 +345,7 @@ async function demo(redrawBars: () => void) {
   const adapter = await gpu?.requestAdapter({ powerPreference: "high-performance" }).catch(() => null);
   if (!adapter) {
     button.disabled = true;
-    set("s-load", "No WebGPU", "in this browser");
+    set("s-load", "–", "no WebGPU here");
     return;
   }
   const info = adapter.info;
@@ -439,6 +388,7 @@ async function demo(redrawBars: () => void) {
     })().catch((error) => {
       loading = null;
       set("s-load", "Failed", String(error?.message ?? error));
+      $("s-load").title = String(error?.message ?? error);
       throw error;
     }));
   voice.onchange = () => tts && void warmUp(tts);
@@ -466,12 +416,18 @@ async function demo(redrawBars: () => void) {
     s.start(at);
     sources.push(s);
   };
-  /** Lights each word while it is heard, from audio time `start` on the context's clock. */
+  /** Lights each word while it is heard, from audio time `start` on the context's clock, and
+   *  keeps it in view when the text is longer than the box. */
   const follow = (speech: Speech, start: number) => {
-    const spans = [...words.children];
+    const spans = [...words.children] as HTMLElement[];
     const tick = () => {
       const t = ctx!.currentTime - start;
-      spans.forEach((s, i) => s.classList.toggle("now", t >= speech.words[i].start && t < speech.words[i].end));
+      spans.forEach((s, i) => {
+        const now = t >= speech.words[i].start && t < speech.words[i].end;
+        if (now && !s.classList.contains("now") && (s.offsetTop < words.scrollTop || s.offsetTop + s.offsetHeight > words.scrollTop + words.clientHeight))
+          words.scrollTop = s.offsetTop - 10;
+        s.classList.toggle("now", now);
+      });
       if (t < speech.audio.length / 24000) frame = requestAnimationFrame(tick);
       else done();
     };
@@ -482,8 +438,12 @@ async function demo(redrawBars: () => void) {
     abort = null;
     sources = [];
   };
+  const text = $<HTMLTextAreaElement>("text");
+  // Editing the text puts the words away: they belong to the text that was spoken.
+  text.onfocus = () => words.classList.remove("on");
   const showWords = (speech: Speech) => {
-    words.classList.remove("empty");
+    words.classList.add("on");
+    words.scrollTop = 0;
     words.replaceChildren(
       ...speech.words.flatMap((w) => {
         const s = document.createElement("span");
@@ -535,7 +495,7 @@ async function demo(redrawBars: () => void) {
         set("s-audio", `${made.toFixed(1)} s`);
       };
       $("s-speed").classList.add("live");
-      const speech = await p.speak($<HTMLTextAreaElement>("text").value, {
+      const speech = await p.speak(text.value, {
         voice: voice.value,
         speed: Number(speed.value),
         signal,
@@ -567,11 +527,9 @@ async function demo(redrawBars: () => void) {
   };
 }
 
-const redrawBars = barChart();
-for (const box of document.querySelectorAll<HTMLElement>("[data-chart]")) {
-  const draw = { length: lengthChart, timing: timingChart, quality: qualityChart }[box.dataset.chart!];
-  draw?.(box);
-}
+const redrawBars = barChart($("bars"));
+const charts: Record<string, (frame: HTMLElement) => void> = { length: lengthChart, timing: timingChart, quality: qualityChart };
+for (const frame of document.querySelectorAll<HTMLElement>("[data-chart]")) charts[frame.dataset.chart!]?.(frame);
 const listen = document.getElementById("listen-players");
 if (listen) listenPlayers(listen);
 void demo(redrawBars);

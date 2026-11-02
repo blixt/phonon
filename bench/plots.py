@@ -60,7 +60,9 @@ for dev in devices:
             "coldFirstMs": stat([r["phrases"][0]["firstMs"] for r in d["cold"]]),
             "coldStartMs": stat([r["loadMs"] + r["phrases"][0]["firstMs"] for r in d["cold"]]),
             "coldPageMs": stat([r["pageMs"] for r in d["cold"]]),
-            "firstVisitMs": stat([r["loadMs"] + r["phrases"][0]["firstMs"] for r in d["first"]]),
+            # phonon-tts on the CPU loads the weights file that phonon-tts on WebGPU downloaded just
+            # before it, so it has no first visit of its own.
+            "firstVisitMs": None if rt == "gradiumCpu" else stat([r["loadMs"] + r["phrases"][0]["firstMs"] for r in d["first"]]),
         }
 # What the web page's charts draw beyond the medians: each warm phrase (seconds of speech,
 # × real time), the word timing errors and the quality scores.

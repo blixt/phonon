@@ -25,28 +25,24 @@
   <h1>Fast text-to-speech in the browser, with a start and end time for every word.</h1>
   <div class="grid">
     <section class="card demo" id="demo" aria-label="Try it">
-      <textarea id="text" aria-label="Text to speak">The birch canoe slid on the smooth planks. Glue the sheet to the dark blue background.</textarea>
+      <div class="field">
+        <textarea id="text" aria-label="Text to speak">The birch canoe slid on the smooth planks. Glue the sheet to the dark blue background.</textarea>
+        <p class="words" id="words" aria-live="off"></p>
+      </div>
       <div class="controls">
         <select id="voice" aria-label="Voice"><option>Delia</option></select>
         <label>Speed <input id="speed" type="range" min="0.8" max="1.3" step="0.05" value="1" /><output id="speed-out">1.0×</output></label>
         <button class="speak" id="speak">Speak</button>
       </div>
-      <p class="words empty" id="words"></p>
       <div class="stats">
         <div class="stat" id="s-load"><b>43.7 MB</b><span>download</span></div>
         <div class="stat" id="s-first"><b>–</b><span>first audio</span></div>
         <div class="stat" id="s-speed"><b>–</b><span>real time</span></div>
         <div class="stat" id="s-audio"><b>–</b><span>speech made</span></div>
       </div>
-      <p class="device" id="device"></p>
+      <p class="device" id="device">&nbsp;</p>
     </section>
-    <section class="card bench" aria-label="Benchmarks">
-      <div class="tabs" role="tablist" id="metric"></div>
-      <p class="caption" id="metric-caption"></p>
-      <div class="chart" id="bars"></div>
-      <ul class="legend" id="bars-legend"></ul>
-      <p class="note">Medians of 10 rounds per device. Whiskers: 25th to 75th percentile. <a href="#results">All results</a></p>
-    </section>
+    <section class="card bench" id="bars" aria-label="Benchmarks"><div class="tabs" role="tablist"><button role="tab" aria-selected="true" data-label="Speed">Speed</button><button role="tab" aria-selected="false" data-label="First audio">First audio</button><button role="tab" aria-selected="false" data-label="Cold start">Cold start</button><button role="tab" aria-selected="false" data-label="First visit">First visit</button></div><div class="captions"><p class="caption">Seconds of speech per second of compute, warm.</p><p class="caption off">Milliseconds from the call to the first chunk of audio, warm.</p><p class="caption off">Milliseconds for a fresh page to load the runtime and speak one sentence, with the files cached.</p><p class="caption off">Seconds for a fresh page to speak with nothing cached. It downloads 43.7 MB, 64.5 MB (phonon-tts) or 326 MB (Kokoro).</p></div><div class="chart" data-plot></div><ul class="legend"><li><i class="s-ours"></i>blixt/phonon</li><li><i class="s-gradiumWebgpu"></i>phonon-tts WebGPU</li><li><i class="s-gradiumCpu"></i>phonon-tts CPU</li><li><i class="s-kokoro"></i>Kokoro 82M</li></ul><p class="note">Medians of 10 rounds per device. Whiskers: 25th to 75th percentile. <a href="#results">All results</a></p></section>
   </div>
 </section>
 <div class="docs wrap">
@@ -195,14 +191,14 @@
 </tbody></table></div>
 <!-- results:end --><p>Each value is a median, and the bars show the 25th and 75th percentiles. Speed is seconds of speech per second of compute, over every phrase of every warm run: 30× means that 10 seconds of speech take about a third of a second to make. Cold start is a fresh page that loads the runtime and speaks one sentence, with the files already in the browser&#39;s cache. First visit is the same with nothing cached, which includes the download from Hugging Face over the machine&#39;s normal internet connection. Kokoro&#39;s first audio is its whole first sentence, because the benchmark gives it one sentence per call. phonon-tts on the CPU has no First visit: it reads the weights file that phonon-tts on WebGPU downloaded just before it.</p>
 <p>blixt/phonon gets faster as texts get longer, because each text has a fixed cost before its first frame. The other runtimes stay near one speed:</p>
-<figure class="chart-box" data-chart="length" aria-label="Speed against text length"></figure>
+<figure class="chart-box chart-length" data-chart="length" aria-label="Speed against text length"><div class="captions"><p class="caption">Each dot is one warm phrase. Log scales.</p></div><div class="tabs" role="tablist"><button role="tab" aria-selected="true" data-label="M3 Max">M3 Max</button><button role="tab" aria-selected="false" data-label="RTX 2080 Ti">RTX 2080 Ti</button><button role="tab" aria-selected="false" data-label="iPhone 17 Pro">iPhone 17 Pro</button></div><div class="chart" data-plot></div><ul class="legend"><li><button aria-pressed="true" data-runtime="ours"><i class="s-ours"></i>blixt/phonon</button></li><li><button aria-pressed="true" data-runtime="gradiumWebgpu"><i class="s-gradiumWebgpu"></i>phonon-tts WebGPU</button></li><li><button aria-pressed="true" data-runtime="gradiumCpu"><i class="s-gradiumCpu"></i>phonon-tts CPU</button></li><li><button aria-pressed="true" data-runtime="kokoro"><i class="s-kokoro"></i>Kokoro 82M</button></li></ul></figure>
 <p>The word times come from the model&#39;s attention, corrected with the audio&#39;s loudness. This figure compares each word start with <a href="https://huggingface.co/facebook/wav2vec2-base-960h">wav2vec2</a> forced alignment of the same audio:</p>
-<figure class="chart-box" data-chart="timing" aria-label="Word timing error"></figure>
+<figure class="chart-box chart-timing" data-chart="timing" aria-label="Word timing error"><div class="captions"><p class="caption">712 words, 4 voices. Median absolute error 65 ms, 76% within 100 ms.</p></div><div class="chart" data-plot></div></figure>
 <p>All four runtimes speak clearly. <a href="https://github.com/blixt/phonon/blob/main/bench/quality.py">bench/quality.py</a> scored each runtime&#39;s 110 warm clips on the M3 Max with <a href="https://huggingface.co/openai/whisper-large-v3-turbo">Whisper large-v3-turbo</a> and <a href="https://github.com/tarepan/SpeechMOS">UTMOS</a>:</p>
-<figure class="chart-box" data-chart="quality" aria-label="Quality"></figure>
+<figure class="chart-box chart-quality" data-chart="quality" aria-label="Quality"><div class="captions"><p class="caption">Lines show 95% intervals.</p></div><div class="chart" data-plot></div></figure>
 </div></section>
 <section class="doc" id="listen"><div><h2>Listen</h2></div><div class="body"><p>The <a href="listen.html">listening page</a> plays every benchmark phrase from each runtime, side by side. The three Phonon runtimes use the same model and the same voice (Delia). They sample with different random numbers, so each clip is a different take of the same text. Kokoro 82M is a different model, there for reference. The clips are also in <a href="https://github.com/blixt/phonon/tree/main/docs/audio">docs/audio</a>.</p>
-<div class="listen" id="listen-players"></div></div></section>
+<div class="listen" id="listen-players"><select aria-label="Phrase"><option value="h01">The birch canoe slid on the smooth planks.</option><option value="h02">Glue the sheet to the dark blue background.</option><option value="h03">It's easy to tell the depth of a well.</option><option value="h04">These days a chicken leg is a rare dish.</option><option value="h05">Rice is often served in round bowls.</option><option value="h06">The juice of lemons makes fine punch.</option><option value="h07">The box was thrown beside the parked truck.</option><option value="h08">The hogs were fed chopped corn and garbage.</option><option value="h09">Four hours of steady work faced us.</option><option value="h10">A large size in stockings is hard to sell.</option><option value="rainbow">When the sunlight strikes raindrops in the air, they act as a prism and form a rainbow. …</option></select><div class="players"><button aria-pressed="false" data-runtime="ours"><i class="s-ours"></i><span>blixt/phonon<small>WebGPU</small></span></button><button aria-pressed="false" data-runtime="gradiumWebgpu"><i class="s-gradiumWebgpu"></i><span>phonon-tts<small>WebGPU</small></span></button><button aria-pressed="false" data-runtime="gradiumCpu"><i class="s-gradiumCpu"></i><span>phonon-tts<small>CPU</small></span></button><button aria-pressed="false" data-runtime="kokoro"><i class="s-kokoro"></i><span>Kokoro 82M<small>different model</small></span></button></div></div></div></section>
 <section class="doc" id="use-it"><div><h2>Use it</h2></div><div class="body"><pre><code class="language-sh">npm install github:blixt/phonon   # the package is named phonon-webgpu
 </code></pre>
 <pre><code class="language-js">import { Phonon } from &quot;phonon-webgpu&quot;;

@@ -2,6 +2,7 @@
 // The README's tagline heads the page, and each of its "##" sections follows the first screen. The site's own charts replace the README's figures.
 import { readFileSync, writeFileSync } from "node:fs";
 import { marked } from "marked";
+import { frames } from "../site/frames";
 
 const REPO = "https://github.com/blixt/phonon";
 /** README figures the page draws itself (site/site.ts), or leaves out: the first screen's chart
@@ -25,7 +26,7 @@ function render(md: string): string {
   html = html.replace(/<p><img src="docs\/figures\/([\w-]+)\.svg" alt="([^"]*)"\s*\/?><\/p>/g, (_, name: string, alt: string) => {
     const chart = CHARTS[name];
     if (chart === undefined) throw new Error(`No chart for the figure ${name}`);
-    return chart ? `<figure class="chart-box" data-chart="${chart}" aria-label="${alt}"></figure>` : "";
+    return chart ? `<figure class="chart-box chart-${chart}" data-chart="${chart}" aria-label="${alt}">${frames[chart as keyof typeof frames]()}</figure>` : "";
   });
   // Links into the repository, and to this page.
   html = html.replace(/href="([^"#:]+)"/g, (_, path: string) => {
@@ -50,7 +51,7 @@ const sections = parts.map((part) => {
   const toc = subs.length
     ? `<ul class="toc">${subs.map(([, id, t]) => `<li><a href="#${id}">${t}</a></li>`).join("")}</ul>`
     : "";
-  const listen = title === "Listen" ? '<div class="listen" id="listen-players"></div>' : "";
+  const listen = title === "Listen" ? `<div class="listen" id="listen-players">${frames.listen()}</div>` : "";
   return `<section class="doc" id="${slug(title)}"><div><h2>${title}</h2>${toc}</div><div class="body">${body}${listen}</div></section>`;
 });
 
@@ -58,6 +59,7 @@ const taglineHtml = marked.parseInline(tagline, { async: false });
 const page = readFileSync("site/index.html", "utf8")
   .replace("{{tagline-text}}", text(taglineHtml))
   .replace("{{tagline}}", taglineHtml)
+  .replace("{{bars}}", frames.bars())
   .replace("{{sections}}", sections.join("\n"));
 writeFileSync("docs/index.html", page);
 console.log(`docs/index.html: ${sections.length} sections`);

@@ -45,6 +45,7 @@ a:hover { text-decoration: underline; }
 code { font: 0.88em var(--mono); background: var(--panel); padding: 0.1em 0.35em; border-radius: 4px; }
 pre { background: var(--panel); border-radius: 10px; padding: 14px 16px; overflow-x: auto; font: 13.5px/1.55 var(--mono); }
 pre code { background: none; padding: 0; font: inherit; }
+:not(pre) > code { overflow-wrap: anywhere; }
 button, select, textarea, input { font: inherit; color: inherit; }
 .wrap { max-width: 1240px; margin: 0 auto; padding: 0 clamp(16px, 4vw, 44px); }
 
@@ -64,30 +65,33 @@ button, select, textarea, input { font: inherit; color: inherit; }
 
 /* Demo */
 .demo { display: flex; flex-direction: column; gap: 12px; }
-.demo textarea {
-  width: 100%; min-height: 92px; resize: vertical; border: 0; border-radius: 10px;
-  background: var(--panel); padding: 10px 12px; line-height: 1.5; font-size: 16px;
+.field { position: relative; }
+.demo textarea, .words {
+  display: block; width: 100%; height: calc(4lh + 10px); margin: 0; border: 0; border-radius: 10px;
+  background: var(--panel); padding: 10px 12px 0; font-size: 16px; line-height: 1.5; overflow: auto;
 }
+.demo textarea { resize: none; }
+/* The spoken words, over the text they came from: clicks between words reach the text. */
+.words { position: absolute; inset: 0; visibility: hidden; pointer-events: none; color: var(--ink); }
+.words.on { visibility: visible; }
 .demo textarea:focus, .demo select:focus-visible, .demo button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; }
 .controls select { border: 0; border-radius: 8px; background: var(--panel); padding: 8px 10px; width: 8em; }
 .controls label { display: flex; align-items: center; gap: 8px; color: var(--ink2); font-size: 15px; }
 .controls input[type="range"] { accent-color: var(--accent); width: 80px; }
-.controls output { min-width: 3.2ch; }
+.controls output { display: inline-block; width: 3.4em; }
 .speak {
   margin-left: auto; border: 0; border-radius: 999px; background: var(--accent); color: #fff; font-weight: 600;
-  padding: 9px 20px; cursor: pointer; min-width: 96px;
+  padding: 9px 0; cursor: pointer; width: 96px;
 }
 @media (prefers-color-scheme: dark) { .speak { color: #2a1210; } }
 @media (max-width: 520px) {
-  .controls select { width: 7.5em; }
-  .controls input[type="range"] { width: 84px; }
+  .controls select { width: 7em; }
+  .controls input[type="range"] { width: 72px; }
   .speak { flex: 1 0 100%; margin-left: 0; padding: 11px; }
 }
 .speak:disabled { opacity: 0.5; cursor: default; }
-.words { margin: 0; color: var(--ink2); line-height: 1.7; font-size: 17px; }
-.words.empty { display: none; }
-.words span { border-radius: 4px; padding: 1px 0; cursor: pointer; transition: background 0.08s; }
+.words span { border-radius: 4px; cursor: pointer; pointer-events: auto; transition: background 0.08s; }
 .words span:hover { background: var(--panel); }
 .words span.now { background: var(--accent); color: #fff; }
 @media (prefers-color-scheme: dark) { .words span.now { color: #2a1210; } }
@@ -103,14 +107,26 @@ button, select, textarea, input { font: inherit; color: inherit; }
 .tabs { display: flex; gap: 2px; margin-bottom: 10px; overflow-x: auto; scrollbar-width: none; }
 .tabs::-webkit-scrollbar { display: none; }
 .tabs button {
-  border: 0; background: none; border-radius: 999px; padding: 5px 11px; font-size: 14.5px; color: var(--ink2); cursor: pointer; white-space: nowrap; flex: none;
+  display: inline-flex; flex-direction: column; align-items: center; flex: none;
+  border: 0; background: none; border-radius: 999px; padding: 5px 11px; font-size: 14.5px; color: var(--ink2); cursor: pointer; white-space: nowrap;
 }
+/* The bold label's width, kept by every tab, so selecting one moves nothing. */
+.tabs button::after { content: attr(data-label); height: 0; overflow: hidden; visibility: hidden; font-weight: 600; user-select: none; }
 .tabs button[aria-selected="true"] { background: var(--panel); color: var(--ink); font-weight: 600; }
-.caption { font-size: 14px; color: var(--muted); margin: 0 0 6px; min-height: 1.6em; }
+.captions { display: grid; margin: 0 0 6px; }
+.caption { grid-area: 1 / 1; font-size: 14px; color: var(--muted); margin: 0; }
+.caption.off { visibility: hidden; }
+/* Chart boxes take their size from CSS alone; the script draws to fit them. */
+.bench, .chart-box { container-type: inline-size; }
 .chart { position: relative; width: 100%; }
-.chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.bench .chart { height: clamp(250px, 62cqw, 310px); }
+.chart-length .chart { height: clamp(240px, 50cqw, 360px); }
+.chart-timing .chart { height: clamp(180px, 32cqw, 240px); }
+.chart-quality .chart { height: 308px; }
+@container (min-width: 560px) { .chart-quality .chart { height: 146px; } }
+.chart svg { display: block; width: 100%; height: 100%; overflow: visible; }
 .chart text { fill: var(--ink2); font-size: 12.5px; }
-.chart .val { fill: var(--ink); font-weight: 600; }
+.chart .val { fill: var(--ink); font-weight: 600; paint-order: stroke; stroke: var(--bg); stroke-width: 3px; stroke-linejoin: round; }
 .chart .group { fill: var(--ink); font-size: 14px; font-weight: 500; }
 .chart .group.you { fill: var(--link); }
 .chart .axis { stroke: var(--line); stroke-width: 1.5; }
