@@ -14,10 +14,10 @@ const TIMING = (results as unknown as { timing: { errorsMs: number[]; words: num
 const QUALITY = (results as unknown as { quality: { clips: Record<string, number>; wer: Record<string, number[]>; utmos: Record<string, number[]> } }).quality;
 
 const RUNTIMES = [
-  { id: "ours", name: "blixt/phonon", mb: 43.7 },
-  { id: "gradiumWebgpu", name: "phonon-tts WebGPU", mb: 64.5 },
-  { id: "gradiumCpu", name: "phonon-tts CPU", mb: 0 },
-  { id: "kokoro", name: "Kokoro 82M", mb: 326 },
+  { id: "ours", name: "blixt/phonon" },
+  { id: "gradiumWebgpu", name: "phonon-tts WebGPU" },
+  { id: "gradiumCpu", name: "phonon-tts CPU" },
+  { id: "kokoro", name: "Kokoro 82M" },
 ];
 const DEVICES = [
   { id: "mac", name: "M3 Max", full: "MacBook Pro, M3 Max, Chrome" },
@@ -25,13 +25,13 @@ const DEVICES = [
   { id: "iphone", name: "iPhone 17 Pro", full: "iPhone 17 Pro, Safari" },
 ];
 const METRICS: { id: Metric; tab: string; caption: string; unit: "x" | "ms" }[] = [
-  { id: "warmRealtime", tab: "Speed", caption: "Seconds of speech per second of compute. Higher is faster.", unit: "x" },
-  { id: "warmFirstMs", tab: "First audio", caption: "From the call to the first chunk of audio, warm. Lower is better.", unit: "ms" },
-  { id: "coldStartMs", tab: "Cold start", caption: "A fresh page loads the runtime and speaks, files cached. Lower is better.", unit: "ms" },
+  { id: "warmRealtime", tab: "Speed", caption: "Seconds of speech per second of compute, warm.", unit: "x" },
+  { id: "warmFirstMs", tab: "First audio", caption: "From the call to the first chunk of audio, warm.", unit: "ms" },
+  { id: "coldStartMs", tab: "Cold start", caption: "A fresh page loads the runtime and speaks one sentence, with the files cached.", unit: "ms" },
   {
     id: "firstVisitMs",
     tab: "First visit",
-    caption: "The same with nothing cached: a download of 43.7 MB, 64.5 MB (phonon-tts) or 326 MB (Kokoro).",
+    caption: "A fresh page with nothing cached. Downloads 43.7 MB, 64.5 MB (phonon-tts) or 326 MB (Kokoro).",
     unit: "ms",
   },
 ];
@@ -131,7 +131,7 @@ function barChart() {
   const draw = (W: number) => {
     const groups = [...DEVICES.map((d) => ({ id: d.id, name: d.name, full: d.full, you: false }))];
     const own = mine[metric.id];
-    if (own) groups.push({ id: "you", name: "This device", full: "This device, this page", you: true });
+    if (own) groups.push({ id: "you", name: "This device", full: "This device", you: true });
     const H = Math.round(Math.min(310, Math.max(250, W * 0.62)));
     const top = 26, bottom = 36;
     const stat = (g: string, r: string): Stat =>
@@ -177,16 +177,12 @@ function barChart() {
           : failed
             ? "did not finish"
             : "not measured";
-        const extra = g.you
-          ? `<br>${metric.id === "warmRealtime" ? "your last text" : "your last run"}`
-          : metric.id === "firstVisitMs" && r.mb && s
-            ? `<br>${r.mb} MB download`
-            : "";
+        const extra = g.you ? "<br>your last run" : "";
         hit.onpointerenter = hit.onpointerdown = () =>
           tip.show(`${r.name} · ${g.full}<br>${label}${extra}`, cx, s ? Math.min(y(s.median), y(s.p75)) - 18 : base - 30);
         hit.onpointerleave = () => tip.hide();
       });
-      el("text", { class: g.you ? "group you" : "group", x: x + gw / 2, y: H - 10, "text-anchor": "middle" }, svg).textContent = g.name;
+      el("text", { class: g.you ? "group you" : "group", x: g.you ? x + gw : x + gw / 2, y: H - 10, "text-anchor": g.you ? "end" : "middle" }, svg).textContent = g.name;
       x += gw + gap;
     }
     el("line", { class: "axis", x1: 0, x2: W, y1: base, y2: base }, svg);
@@ -200,7 +196,7 @@ function barChart() {
 // ---- Charts in the README's sections. ----
 
 function lengthChart(box: HTMLElement) {
-  box.innerHTML = `<h4>Speed against text length</h4><p class="caption">Every warm phrase of every round. Log scales.</p><div class="tabs" role="tablist"></div><div class="chart"></div><ul class="legend"></ul>`;
+  box.innerHTML = `<p class="caption">Each dot is one warm phrase. Log scales.</p><div class="tabs" role="tablist"></div><div class="chart"></div><ul class="legend"></ul>`;
   const plot = box.querySelector<HTMLElement>(".chart")!;
   const tabs = box.querySelector<HTMLElement>(".tabs")!;
   const tip = tooltip(plot);
@@ -274,7 +270,7 @@ function lengthChart(box: HTMLElement) {
 
 function timingChart(box: HTMLElement) {
   const t = TIMING;
-  box.innerHTML = `<h4>Word starts against forced alignment</h4><p class="caption">${t.words} words, 4 voices. Median error ${Math.round(t.medianMs)} ms, ${Math.round(t.within100ms * 100)}% within 100 ms.</p><div class="chart"></div>`;
+  box.innerHTML = `<p class="caption">${t.words} words, 4 voices. Median absolute error ${Math.round(t.medianMs)} ms, ${Math.round(t.within100ms * 100)}% within 100 ms.</p><div class="chart"></div>`;
   const plot = box.querySelector<HTMLElement>(".chart")!;
   const tip = tooltip(plot);
   const bins = new Map<number, number>();
@@ -302,7 +298,7 @@ function timingChart(box: HTMLElement) {
       el("text", { x: x(v), y: H - 10, "text-anchor": v === -300 ? "start" : v === 300 ? "end" : "middle" }, svg).textContent = `${v > 0 ? "+" : ""}${v} ms`;
     const m = t.medianSignedMs;
     el("line", { class: "median", x1: x(m), x2: x(m), y1: T - 12, y2: H - B }, svg);
-    el("text", { x: x(m) + 6, y: T - 16 }, svg).textContent = `median ${m > 0 ? "+" : ""}${Math.round(m)} ms, blixt/phonon later`;
+    el("text", { x: x(m) + 6, y: T - 16 }, svg).textContent = `median ${m > 0 ? "+" : ""}${Math.round(m)} ms (later)`;
     el("line", { class: "axis", x1: L, x2: W - R, y1: H - B, y2: H - B }, svg);
     plot.querySelector("svg")?.remove();
     plot.prepend(svg);
@@ -311,8 +307,7 @@ function timingChart(box: HTMLElement) {
 
 function qualityChart(box: HTMLElement) {
   const q = QUALITY;
-  const clips = Math.min(...Object.values(q.clips));
-  box.innerHTML = `<h4>Quality</h4><p class="caption">${clips} warm clips per runtime on the M3 Max, with 95% intervals.</p><div class="chart"></div>`;
+  box.innerHTML = `<p class="caption">Lines show 95% intervals.</p><div class="chart"></div>`;
   const plot = box.querySelector<HTMLElement>(".chart")!;
   const tip = tooltip(plot);
   const panels = [
@@ -364,7 +359,7 @@ function listenPlayers(box: HTMLElement) {
     playing = null;
   };
   audio.onended = stop;
-  const notes: Record<string, string> = { ours: "WebGPU", gradiumWebgpu: "Gradium, WebGPU", gradiumCpu: "Gradium, CPU", kokoro: "another model" };
+  const notes: Record<string, string> = { ours: "WebGPU", gradiumWebgpu: "WebGPU", gradiumCpu: "CPU", kokoro: "different model" };
   for (const r of RUNTIMES) {
     const b = document.createElement("button");
     b.setAttribute("aria-pressed", "false");
@@ -537,7 +532,7 @@ async function demo(redrawBars: () => void) {
       const live = () => {
         const took = performance.now() - t0;
         set("s-speed", `${Math.round(made / (took / 1000))}×`);
-        set("s-audio", `${made.toFixed(1)} s`, `in ${ms(took)}`);
+        set("s-audio", `${made.toFixed(1)} s`);
       };
       $("s-speed").classList.add("live");
       const speech = await p.speak($<HTMLTextAreaElement>("text").value, {

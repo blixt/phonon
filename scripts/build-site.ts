@@ -1,6 +1,6 @@
 // The web page (docs/index.html): site/index.html with the README's text laid out in it.
-// The README's tagline heads the page, its intro opens an "About" section, and each of its
-// "##" sections follows. The site's own charts replace the README's figures.
+// The README's tagline heads the page, its intro paragraph follows the first screen, and each
+// of its "##" sections follows that. The site's own charts replace the README's figures.
 import { readFileSync, writeFileSync } from "node:fs";
 import { marked } from "marked";
 
@@ -44,7 +44,7 @@ const readme = readFileSync("README.md", "utf8");
 const [head, ...parts] = readme.split(/^## /m);
 const paragraphs = head.split(/\n{2,}/).map((p) => p.trim()).filter((p) => p && !p.startsWith("#"));
 const [tagline, intro] = paragraphs;
-const sections = [`About\n\n${intro}`, ...parts].map((part) => {
+const sections = [`\n\n${intro}`, ...parts].map((part) => {
   const title = part.slice(0, part.indexOf("\n")).trim();
   const body = render(part.slice(part.indexOf("\n")));
   const subs = [...body.matchAll(/<h3 id="([^"]+)">(.*?)<\/h3>/g)];
@@ -52,7 +52,7 @@ const sections = [`About\n\n${intro}`, ...parts].map((part) => {
     ? `<ul class="toc">${subs.map(([, id, t]) => `<li><a href="#${id}">${t}</a></li>`).join("")}</ul>`
     : "";
   const listen = title === "Listen" ? '<div class="listen" id="listen-players"></div>' : "";
-  return `<section class="doc" id="${slug(title)}"><div><h2>${title}</h2>${toc}</div><div class="body">${body}${listen}</div></section>`;
+  return `<section class="doc" id="${slug(title) || "about"}"><div>${title ? `<h2>${title}</h2>` : ""}${toc}</div><div class="body">${body}${listen}</div></section>`;
 });
 
 const taglineHtml = marked.parseInline(tagline, { async: false });
