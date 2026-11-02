@@ -7,8 +7,9 @@
     "strict": true,
     "noEmit": false,
     "declaration": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "resolveJsonModule": true
   },
-  "include": ["src", "demo"],
+  "include": ["src", "site"],
   "exclude": ["src/**/*.test.ts"]
 }

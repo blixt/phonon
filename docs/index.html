@@ -1,26 +1,351 @@
 <!doctype html>
 <html lang="en">
+<head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Phonon on WebGPU</title>
-<style>
-  body { font: 17px/1.5 system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; color: #1d1d1f; }
-  textarea { width: 100%; font: inherit; min-height: 6rem; box-sizing: border-box; }
-  .row { display: flex; gap: 0.75rem; align-items: center; margin: 0.75rem 0; flex-wrap: wrap; }
-  #words span { padding: 0 1px; border-radius: 3px; }
-  #words span.now { background: #ffe58a; }
-  #status { color: #6e6e73; font-size: 0.9rem; }
-  @media (prefers-color-scheme: dark) { body { background: #111; color: #eee; } #words span.now { background: #6b5800; } }
-</style>
-<h1>Phonon on WebGPU</h1>
-<textarea id="text">The birch canoe slid on the smooth planks. Glue the sheet to the dark blue background.</textarea>
-<div class="row">
-  <select id="voice"></select>
-  <label>Speed <input id="speed" type="range" min="0.8" max="1.3" step="0.1" value="1" /></label>
-  <button id="speak" disabled>Speak</button>
+<title>blixt/phonon: Phonon text-to-speech on WebGPU, with word timings</title>
+<meta name="description" content="Fast text-to-speech in the browser, with a start and end time for every word." />
+<meta name="theme-color" content="#fbf5f2" media="(prefers-color-scheme: light)" />
+<meta name="theme-color" content="#171312" media="(prefers-color-scheme: dark)" />
+<link rel="stylesheet" href="style.css" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='14' width='6' height='15' rx='2' fill='%23e0625a'/%3E%3Crect x='13' y='4' width='6' height='25' rx='2' fill='%23e0625a'/%3E%3Crect x='23' y='10' width='6' height='19' rx='2' fill='%23e0625a'/%3E%3C/svg%3E" />
+</head>
+<body>
+<header class="top wrap">
+  <a class="mark" href="#">blixt/phonon</a>
+  <nav>
+    <a href="#results">Results</a>
+    <a href="#use-it">Use it</a>
+    <a href="#how-it-works">How it works</a>
+    <a class="gh" href="https://github.com/blixt/phonon">GitHub</a>
+  </nav>
+</header>
+<main>
+<section class="hero wrap">
+  <h1>Fast text-to-speech in the browser, with a start and end time for every word.</h1>
+  <p class="meta"><span>Phonon 31M by Gradium</span><span>WebGPU</span><span>43.7 MB</span><span>Apache-2.0</span></p>
+  <div class="grid">
+    <section class="card demo" id="demo" aria-label="Try it">
+      <textarea id="text" aria-label="Text to speak">The birch canoe slid on the smooth planks. Glue the sheet to the dark blue background.</textarea>
+      <div class="controls">
+        <select id="voice" aria-label="Voice"><option>Delia</option></select>
+        <label>Speed <input id="speed" type="range" min="0.8" max="1.3" step="0.05" value="1" /><output id="speed-out">1.0×</output></label>
+        <button class="speak" id="speak">Speak</button>
+      </div>
+      <p class="words empty" id="words">Each word lights up as you hear it. Tap a word to hear it from there.</p>
+      <div class="stats">
+        <div class="stat" id="s-load"><b>43.7 MB</b><span>download</span></div>
+        <div class="stat" id="s-first"><b>–</b><span>to first audio</span></div>
+        <div class="stat" id="s-speed"><b>–</b><span>real time</span></div>
+        <div class="stat" id="s-audio"><b>–</b><span>of speech</span></div>
+      </div>
+      <p class="device" id="device"></p>
+    </section>
+    <section class="card bench" aria-label="Benchmarks">
+      <div class="tabs" role="tablist" id="metric"></div>
+      <p class="caption" id="metric-caption"></p>
+      <div class="chart" id="bars"></div>
+      <ul class="legend" id="bars-legend"></ul>
+      <p class="note">Medians of 10 interleaved rounds per device, with the 25th to 75th percentile. <a href="#results">All results</a></p>
+    </section>
+  </div>
+</section>
+<div class="docs wrap">
+<section class="doc" id="about"><div><h2>About</h2></div><div class="body"><p>I wanted speech with word timings for an app that reads text aloud. The browser runtimes I tried were slower than I hoped and gave no timings, so I wrote a WebGPU engine for <a href="https://huggingface.co/gradium/phonon-31m-en">Phonon 31M</a>, an Apache-2.0 model by <a href="https://gradium.ai">Gradium</a>. Gradium did not make blixt/phonon. It downloads Gradium&#39;s weights with the large matrices converted to 8-bit integers (43.7 MB, <a href="https://huggingface.co/blixt/phonon-31m-en-webgpu">on Hugging Face</a>) and keeps them in the browser&#39;s cache. It makes 24 kHz English speech in any of Gradium&#39;s English voices, streams the audio as it goes, and returns the times of each word and token. You can set the speaking speed from about 0.77× to 1.3×.</p>
+</div></section>
+<section class="doc" id="why-use-it"><div><h2>Why use it</h2></div><div class="body"><p>Compared with Gradium&#39;s own browser package, <a href="https://www.npmjs.com/package/phonon-tts">phonon-tts</a>, on WebGPU:</p>
+<ul>
+<li>It makes speech 2 to 4 times faster: 115× real time against 31× on an M3 Max, 73× against 21× on an RTX 2080 Ti, and 26× against 13× on an iPhone 17 Pro.</li>
+<li>The first audio of a sentence comes 4 to 5 times sooner: 3 ms against 15 ms on the M3 Max, and 11 ms against 44 ms on the iPhone.</li>
+<li>A fresh page with the model cached speaks 4 to 8 times sooner: 46 ms against 373 ms on the M3 Max.</li>
+<li>The first visit downloads 43.7 MB against 64.5 MB, and speaks sooner: 2.9 s against 3.5 s on the M3 Max, and 9.7 s against 18.2 s on the iPhone.</li>
+<li>It gives the start and end time of every word, which phonon-tts does not.</li>
+<li>The speech is as good: Whisper heard no word errors in 110 clips, the same speaker comes through, and the predicted quality (UTMOS) is 4.40 for both.</li>
+</ul>
+<p>It runs in Chrome on macOS and Windows and in Safari on iOS. I have not tested Firefox or Android.</p>
+</div></section>
+<section class="doc" id="results"><div><h2>Results</h2></div><div class="body">
+
+
+<!-- results:start -->
+<div class="table"><table>
+<thead>
+<tr>
+<th>Device</th>
+<th>Runtime</th>
+<th align="right">Speed (× real time)</th>
+<th align="right">First audio, warm (ms)</th>
+<th align="right">Cold start (ms)</th>
+<th align="right">First visit (s)</th>
+<th align="right">All 11 phrases, warm (s)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>MacBook Pro, M3 Max</td>
+<td><strong>blixt/phonon</strong></td>
+<td align="right">115</td>
+<td align="right">3.2</td>
+<td align="right">46</td>
+<td align="right">2.9</td>
+<td align="right">0.4</td>
+</tr>
+<tr>
+<td>MacBook Pro, M3 Max</td>
+<td>phonon-tts, WebGPU</td>
+<td align="right">31</td>
+<td align="right">14.9</td>
+<td align="right">373</td>
+<td align="right">3.5</td>
+<td align="right">1.8</td>
+</tr>
+<tr>
+<td>MacBook Pro, M3 Max</td>
+<td>phonon-tts, CPU</td>
+<td align="right">15</td>
+<td align="right">9.8</td>
+<td align="right">324</td>
+<td align="right">–</td>
+<td align="right">3.9</td>
+</tr>
+<tr>
+<td>MacBook Pro, M3 Max</td>
+<td>Kokoro 82M, WebGPU</td>
+<td align="right">14</td>
+<td align="right">207.4</td>
+<td align="right">847</td>
+<td align="right">12.0</td>
+<td align="right">4.1</td>
+</tr>
+<tr>
+<td>PC, RTX 2080 Ti</td>
+<td><strong>blixt/phonon</strong></td>
+<td align="right">73</td>
+<td align="right">6.1</td>
+<td align="right">177</td>
+<td align="right">3.3</td>
+<td align="right">0.7</td>
+</tr>
+<tr>
+<td>PC, RTX 2080 Ti</td>
+<td>phonon-tts, WebGPU</td>
+<td align="right">21</td>
+<td align="right">26.5</td>
+<td align="right">702</td>
+<td align="right">4.4</td>
+<td align="right">2.7</td>
+</tr>
+<tr>
+<td>PC, RTX 2080 Ti</td>
+<td>phonon-tts, CPU</td>
+<td align="right">6</td>
+<td align="right">25.5</td>
+<td align="right">569</td>
+<td align="right">–</td>
+<td align="right">10.1</td>
+</tr>
+<tr>
+<td>PC, RTX 2080 Ti</td>
+<td>Kokoro 82M, WebGPU</td>
+<td align="right">11</td>
+<td align="right">271.7</td>
+<td align="right">2022</td>
+<td align="right">15.5</td>
+<td align="right">5.2</td>
+</tr>
+<tr>
+<td>iPhone 17 Pro, Safari 27.2</td>
+<td><strong>blixt/phonon</strong></td>
+<td align="right">26</td>
+<td align="right">10.7</td>
+<td align="right">147</td>
+<td align="right">9.7</td>
+<td align="right">2.1</td>
+</tr>
+<tr>
+<td>iPhone 17 Pro, Safari 27.2</td>
+<td>phonon-tts, WebGPU</td>
+<td align="right">13</td>
+<td align="right">43.8</td>
+<td align="right">550</td>
+<td align="right">18.2</td>
+<td align="right">5.1</td>
+</tr>
+<tr>
+<td>iPhone 17 Pro, Safari 27.2</td>
+<td>phonon-tts, CPU</td>
+<td align="right">6</td>
+<td align="right">31.2</td>
+<td align="right">568</td>
+<td align="right">–</td>
+<td align="right">10.5</td>
+</tr>
+<tr>
+<td>iPhone 17 Pro, Safari 27.2</td>
+<td>Kokoro 82M, WebGPU</td>
+<td align="right">did not finish</td>
+<td align="right">did not finish</td>
+<td align="right">did not finish</td>
+<td align="right">did not finish</td>
+<td align="right">did not finish</td>
+</tr>
+</tbody></table></div>
+<!-- results:end --><p>Each value is a median, and the bars show the 25th and 75th percentiles. Speed is seconds of speech per second of compute, over every phrase of every warm run: 30× means that 10 seconds of speech take about a third of a second to make. Cold start is a fresh page that loads the runtime and speaks one sentence, with the files already in the browser&#39;s cache. First visit is the same with nothing cached, which includes the download from Hugging Face over the machine&#39;s normal internet connection. Kokoro&#39;s first audio is its whole first sentence, because the benchmark gives it one sentence per call. phonon-tts on the CPU has no First visit: it reads the weights file that phonon-tts on WebGPU downloaded just before it.</p>
+<p>blixt/phonon gets faster as texts get longer, because each text has a fixed cost before its first frame. The other runtimes stay near one speed:</p>
+<figure class="chart-box" data-chart="length" aria-label="Speed against text length"></figure>
+<p>The word times come from the model&#39;s attention, corrected with the audio&#39;s loudness. This figure compares each word start with <a href="https://huggingface.co/facebook/wav2vec2-base-960h">wav2vec2</a> forced alignment of the same audio:</p>
+<figure class="chart-box" data-chart="timing" aria-label="Word timing error"></figure>
+<p>All four runtimes speak clearly. <a href="https://github.com/blixt/phonon/blob/main/bench/quality.py">bench/quality.py</a> scored each runtime&#39;s 110 warm clips on the M3 Max with <a href="https://huggingface.co/openai/whisper-large-v3-turbo">Whisper large-v3-turbo</a> and <a href="https://github.com/tarepan/SpeechMOS">UTMOS</a>:</p>
+<figure class="chart-box" data-chart="quality" aria-label="Quality"></figure>
+</div></section>
+<section class="doc" id="listen"><div><h2>Listen</h2></div><div class="body"><p>The <a href="listen.html">listening page</a> plays every benchmark phrase from each runtime, side by side. The three Phonon runtimes use the same model and the same voice (Delia). They sample with different random numbers, so each clip is a different take of the same text. Kokoro 82M is a different model, there for reference. The clips are also in <a href="https://github.com/blixt/phonon/tree/main/docs/audio">docs/audio</a>.</p>
+<div class="listen" id="listen-players"></div></div></section>
+<section class="doc" id="use-it"><div><h2>Use it</h2></div><div class="body"><pre><code class="language-sh">npm install github:blixt/phonon   # the package is named phonon-webgpu
+</code></pre>
+<pre><code class="language-js">import { Phonon } from &quot;phonon-webgpu&quot;;
+
+const tts = await Phonon.load({ progress: (percent) =&gt; console.log(percent) });
+const speech = await tts.speak(&quot;The birch canoe slid on the smooth planks.&quot;, {
+  voice: &quot;Delia&quot;, // any English voice of Gradium&#39;s catalog: tts.voices
+  speed: 1,
+  onAudio: (samples) =&gt; {}, // each chunk, as soon as it exists
+});
+// speech.audio: Float32Array at speech.sampleRate (24000)
+// speech.words: [{ text: &quot;The&quot;, start: 0.13, end: 0.40 }, …], in seconds
+// speech.tokens: the same for each token
+</code></pre>
+<p><code>Phonon.load</code> throws when the browser has no WebGPU. The first load downloads 43.7 MB from Hugging Face, and later loads read it from the browser&#39;s cache.</p>
+<p>The code is in <a href="https://github.com/blixt/phonon/tree/main/src">src</a>: <a href="https://github.com/blixt/phonon/blob/main/src/kernels.ts">kernels.ts</a> has the WGSL shaders, <a href="https://github.com/blixt/phonon/blob/main/src/lm.ts">lm.ts</a> the language model, <a href="https://github.com/blixt/phonon/blob/main/src/codec.ts">codec.ts</a> the audio decoder, <a href="https://github.com/blixt/phonon/blob/main/src/engine.ts">engine.ts</a> the loop that drives them and <a href="https://github.com/blixt/phonon/blob/main/src/timing.ts">timing.ts</a> the word times.</p>
+</div></section>
+<section class="doc" id="how-it-works"><div><h2>How it works</h2><ul class="toc"><li><a href="#starting-point">Starting point</a></li><li><a href="#weights">Weights</a></li><li><a href="#speed">Speed</a></li><li><a href="#word-timings">Word timings</a></li><li><a href="#sampling">Sampling</a></li><li><a href="#failed-experiments">Failed experiments</a></li><li><a href="#benchmark-notes">Benchmark notes</a></li><li><a href="#open-work">Open work</a></li></ul></div><div class="body"><p>Everything here goes beyond what the model card and the phonon-tts source say. &quot;The reference&quot; is the PyTorch model in Hugging Face Transformers (<code>GradiumPhononTTSForConditionalGeneration</code>), and the baseline is phonon-tts 0.6.0. Numbers marked (A/B) are the effect of one technique, measured with and without it on the M3 Max in headless Chrome. They are not from the benchmark above.</p>
+<h3 id="starting-point">Starting point</h3>
+<p>The engine is new code: WGSL compute shaders and TypeScript, with no phonon-tts, ONNX Runtime or WebAssembly inside. <a href="https://github.com/blixt/phonon/blob/main/bench/parity.py">bench/parity.py</a> checks the engine against the reference. It runs the reference in f32 with the engine&#39;s own noise in place of <code>torch.randn</code>, so both should make the same take of each text. On the 11 benchmark texts in the voice Delia, all 11 came out the same length to the frame (the Rainbow passage is 349 frames). The log-mel distance from the reference was 2.6 dB on average, and the waveforms correlated at 0.51. For scale, the reference with a different seed was 9.5 dB away, correlated at 0.21, and had a different length in 6 of the 11 texts. The waveforms are not identical, because int8 weights and an f16 key/value cache change the fine detail of each frame.</p>
+<p>The tokenizer must be <code>tokenizer.5.0.0.json</code>, not <code>tokenizer.json</code>. Only the first has the 191 normalizer rules the model expects, which, for example, turn brackets into commas and add a final period. <a href="https://github.com/blixt/phonon/blob/main/src/tokenizer.ts">tokenizer.ts</a> runs those rules, Metaspace splitting and a Unigram Viterbi search with byte fallback, and its ids match the Python tokenizer.</p>
+<h3 id="weights">Weights</h3>
+<p><a href="https://github.com/blixt/phonon/blob/main/scripts/build-weights.ts">scripts/build-weights.ts</a> converts Gradium&#39;s <code>model.safetensors</code> (the language model in bf16, the codec decoder in f32) once, with <a href="https://github.com/blixt/phonon/blob/main/src/checkpoint.ts">checkpoint.ts</a>, into the file the library downloads from <a href="https://huggingface.co/blixt/phonon-31m-en-webgpu">blixt/phonon-31m-en-webgpu</a>. It does not use the GGUF file.</p>
+<ul>
+<li>The checkpoint stores rotary pairs interleaved (dims 2j and 2j+1). The converter moves the rows of q and k to halves (j and j+32) in each head, so a kernel rotates with two contiguous reads.</li>
+<li>The flow head does one LSD step, from time 0 to time 1. Its time embedding is the same at every step, and the converter adds it once to the bias of <code>cond_embed</code>.</li>
+<li>The codec&#39;s latent projection (1×1, no bias) is merged into the depthwise ×16 upsampling weights, and one kernel denormalizes, projects and upsamples the latents.</li>
+<li>The codec transformer&#39;s layer scales are multiplied into its output projection and second MLP weights.</li>
+<li>Convolution weights become [out][tap][in]. Transposed convolutions have kernel = 2 × stride, and each becomes one GEMM per output phase, [out][phase][tap][in], in which a kernel gathers its inputs and never scatters.</li>
+<li>Every tensor with 16,384 values or more becomes int8, with one f16 scale per 32 values along its rows. The scale is max |value| / 127 after rounding the values to f16, and quantized values round half to even. Other tensors stay f16. Shaders read the whole blob as <code>u32</code> words and unpack with <code>unpack4xI8</code> and <code>unpack2x16float</code>, and all arithmetic is f32, which means no shader needs the <code>shader-f16</code> feature.</li>
+<li>On the 110 warm clips per runtime of the benchmark, Whisper large-v3-turbo found no word errors in blixt/phonon&#39;s speech (95% interval 0 to 0%), against 0.22% (0 to 0.54%) for phonon-tts on WebGPU. The paired difference is −0.22 points (−0.53 to 0). WavLM speaker embeddings of blixt/phonon&#39;s clips are as close to phonon-tts&#39;s clips of the same text (cosine 0.988) as phonon-tts&#39;s clips are to each other across seeds (0.989). UTMOS predicts 4.40 for both. Nobody has run a listening test.</li>
+<li>The file is 43.7 MB, against 103 MB for the checkpoint and 64.5 MB for Gradium&#39;s GGUF file. <code>npm run build-weights</code> rebuilds it byte for byte, and its model card gives the SHA-256.</li>
+</ul>
+<h3 id="speed">Speed</h3>
+<p>In order of their effect:</p>
+<ol>
+<li>The whole autoregressive loop stays on the GPU. A 32-byte state buffer holds the position the next step reads, the frame it makes, the end of speech and the codec&#39;s position (<code>STATE</code> in <a href="https://github.com/blixt/phonon/blob/main/src/kernels.ts">kernels.ts</a>), and each step&#39;s last kernel moves it on. The page encodes many steps into one submit without reading anything back. Results come back through mapped staging buffers, up to 3 submits behind the GPU.</li>
+<li>One GEMV kernel does every single-row matrix product. 32 lanes work on each output row, each lane loads 16 bytes of weights at a time, and the lanes sum with subgroup operations where every subgroup has exactly 32 lanes (Apple and NVIDIA). Other GPUs use a shared-memory reduction, which is also tested. LayerNorm, with its affine weights and the flow head&#39;s adaLN modulation, runs as the GEMV&#39;s prologue in one pass (sum and sum of squares). Together with the int8 weights, this GEMV cuts the language model&#39;s step from 0.65 ms to 0.30 ms (A/B).</li>
+<li>Each voice is prefilled once. A voice is 125 rows of speaker latents. The engine runs them through the 6 layers once and keeps their keys and values (1.5 MB in f16), and each text copies them into the cache and prefills only its own tokens. This cuts first audio from 8.8 ms to 4.9 ms (A/B).</li>
+<li>Nothing is allocated per request. All buffers and bind groups exist from the start: about 108 MB, plus 1.5 MB for each voice used. The key/value cache is f16.</li>
+<li>A step&#39;s attention is split over the keys (flash-decoding). 8 workgroups per head each take a share of the keys and leave a partial sum with its maximum, and the output projection&#39;s GEMV merges the splits in its prologue, at no extra dispatch. Inside a split, 8 lanes share each key for the scores, and 16 lanes × 8 key groups make the values. This halves a layer&#39;s attention, from 30 µs to 15 µs (A/B).</li>
+<li>The GPU decides the end of speech. The step&#39;s last kernel computes the end-of-speech logit, and when it passes 4.0 the kernel writes how many frames to keep. Every heavy kernel reads that number and returns at once for later frames, which makes the steps a submit runs past the end cost about 2 µs each. On short texts, this raises the speed from 115× to 130× (A/B).</li>
+<li>Audio comes out in chunks of 1, 2, 4 and then 8 frames. All chunk sizes share one decoder state: the codec transformer&#39;s ring of keys and values (window 251, ring 512 positions at 200 Hz) and each convolution stage&#39;s left context. After each chunk, a small kernel moves each stage&#39;s last rows to its front, and the convolutions never need a position. The engine clears that context before each text. Chunk size does not change the audio in my tests, though the repository has no test for it.</li>
+<li>Pipelines compile in the background. Each bind group layout is read from its shader&#39;s <code>@binding</code> declarations, which lets bind groups exist before <code>createComputePipelineAsync</code> finishes. This cuts the first request after a load from about 53 ms to 13-19 ms (A/B).</li>
+<li>The prefill has 4 fixed sizes. The text and BOS rows are padded to 64, 128, 192 or 256 rows, each size has prebuilt operations, and a text only writes its ids. Padding rows cannot change the real rows, because attention is causal. Each padding row writes keys and values at a position after BOS, and the step at that position writes its own key and value before it reads the cache. After the prefill, the BOS row is copied to row 0, where the step&#39;s flow head reads.</li>
+<li>The codec&#39;s convolutions are split-K GEMMs with 64×64 tiles, A and B in shared memory as vec4 along K (16 KB, the portable limit). When a GEMM has few output tiles, K is split to reach about 160 workgroups and a second kernel sums the parts. Row tiles are capped at 4 when choosing the splits, so all text lengths share a few shader variants.</li>
+<li>The prefill and the codec transformer use a flash-style attention kernel: 16 query rows share each tile of 16 keys in shared memory, with an online softmax. It gives about 2% (A/B).</li>
+</ol>
+<p>An empty dependent dispatch costs about 1.6 µs in Chrome and WebKit on the M3 Max. A step has 48 dispatches (5 for each of the 6 layers, 18 for the flow head and the end of the step), and their barriers and ramps take about a third of its 300 µs.</p>
+<h3 id="word-timings">Word timings</h3>
+<ol>
+<li>Find a head that follows the text. I ran the reference on four texts and recorded each head&#39;s attention over the text tokens at every 80 ms frame. Each head got a score: the correlation between the frame number and the token it attends most, times the share of frames that do not move back, times its mean peak attention. Layer 3, head 0 scored 0.78. The next best (layer 3, head 5) scored 0.45, and all others 0.15 or less. Layer 3, head 0 has a correlation of 0.99 or more, never moves back and puts about 80% of its attention on one token.</li>
+<li>Record it on the GPU. In every step, the layer 3 attention kernel writes head 0&#39;s scores over the text tokens into an alignment buffer, one row per frame. A small extra kernel in the prefill writes frame 0&#39;s row from the BOS row&#39;s query. After the text ends, the engine reads back the rows of the frames it kept: one small readback per text.</li>
+<li>Turn the scores into a position. For each frame, take the token with the highest score and average the token index over the 2 tokens on each side of it, with softmax weights. The position never moves back.</li>
+<li>Correct the lead. The head reaches a word about 230 ms (about 3 frames) before the audio does, and the times shift back by 3 frames. After a pause, the head reaches the next word 400 to 570 ms early, because it moves on when the previous word ends. A word start that falls where the audio is quieter than −45 dB (in 10 ms steps) moves to where the sound begins.</li>
+<li>Group the tokens into words. A token that starts with ▁ starts a word, unless it is only punctuation.</li>
+</ol>
+<p>I chose the 3-frame shift and the −45 dB threshold on 110 words of four other texts. On those words, a 4-frame shift without the silence step was a mean 110 ms from a wav2vec2 forced aligner, and the chosen settings were about 55 ms. The figure above is a held-out check on the 11 benchmark texts in 4 voices (712 words). Word starts are a mean 67 ms and a median 65 ms from the aligner, 76% are within 100 ms, and the 90th percentile is 125 ms. The median signed difference is +40 ms, with the engine later. Only word starts were scored, and the aligner has its own error of a few tens of milliseconds. The &quot;never move back&quot; rule could also hide a repeated or skipped word.</p>
+<h3 id="sampling">Sampling</h3>
+<p>The flow head&#39;s noise comes from a PCG hash of the seed, the frame and the channel, through Box-Muller, at temperature 0.3. phonon-tts and the reference use other random number generators, and the same seed gives a different take of the same text.</p>
+<p>A text ends when the end-of-speech logit passes 4.0, plus 1 frame, or 3 frames for a text of at most 4 words, as the checkpoint&#39;s <code>processor_config.json</code> says. A text gets at most (tokens / 3 + 2) seconds of frames, as in the reference, and never more than 768 frames (61 s). One text can have up to 240 tokens. <a href="https://github.com/blixt/phonon/blob/main/src/index.ts">index.ts</a> cuts longer texts at sentence ends, then at word ends, and joins the parts and their word times. Each part gets the next seed, because the noise depends on the seed and the frame, and each part starts again at frame 0.</p>
+<p>Speed uses the model&#39;s <code>duration_delta</code> condition. The engine computes the condition vector and the BOS row for a value in the browser and writes them into the weights. I measured clip lengths at several values to make a table from speed to value: 0.77× at +0.6 and 1.3× at −0.45. Values below −0.45 made speech no faster. <a href="https://github.com/blixt/phonon/blob/main/src/pace.ts">pace.ts</a> interpolates the table.</p>
+<h3 id="failed-experiments">Failed experiments</h3>
+<ul>
+<li>Allocating uniforms and split-K buffers for each text added up to 17.3 GB of GPU buffers over 412 requests, all left to the garbage collector.</li>
+<li>Averaging the token index over all tokens, not just around the peak, made the word highlight jump ahead: a little attention on the last token pulled frame 0 to about the 4th token.</li>
+<li>More attention splits (16 or 32 per head) changed nothing.</li>
+<li>Deeper submit queues, or batches of 8 frames before the GPU decided the end, were slower or delayed the first audio.</li>
+<li>Indirect dispatch to skip work past the end costs 5-6 µs per dispatch, against 1.6 µs for a direct one. Kernels that return at once are cheaper.</li>
+<li>vec4 shared-memory tiles in the codec GEMM gave no measurable gain over scalar tiles. The kernel keeps them, since they cost nothing. My first try had a data race: WGSL can store a whole vector when a thread writes one of its components, and threads must not share a vec4 that each writes in part. A padding column against bank conflicts did not fit in 16 KB.</li>
+<li>int4 weights for the language model and the flow head cut 43 MB to 29.5 MB with the same recognizer errors, but gave no speed. They moved clip lengths by up to ±10%, against ±3% for int8. Nobody listened to them, and int8 stayed.</li>
+<li>Chunks of 16 frames made a test hang. I did not find the cause, and chunks stop at 8.</li>
+<li>New split-K variants per text length made the first text of each new length compile new shaders (332 ms). Capping the row tiles at 4 fixed it.</li>
+<li><code>layout: &quot;auto&quot;</code> drops bindings that a shader does not use, and a bind group with the full set then fails. Every kernel now touches all its bindings, and the layouts come from the declarations.</li>
+<li>More than 8 storage buffers in one shader breaks the portable limit. The weights are one buffer, bound once, and kernels get each tensor&#39;s offset in a uniform.</li>
+<li>An <code>uncapturederror</code> handler in a worker crashes the page after a synthesis in WebKit. The engine has none.</li>
+</ul>
+<h3 id="benchmark-notes">Benchmark notes</h3>
+<ul>
+<li><code>kokoro-js</code> <code>stream()</code> never returned on a plain string here. The benchmark calls <code>generate</code> once per sentence.</li>
+<li>Headless WebKit with an in-memory profile keeps no Cache Storage between workers. Use a profile on disk.</li>
+<li>Playwright drops the page when a route fulfils a 100 MB body in Chromium. The benchmark redirects to a local server instead.</li>
+<li>The PC could not reach the Mac over Tailscale (a shared node is one-way). An SSH tunnel carried the page and Chrome&#39;s debugging port, and the page loaded as <code>localhost</code>, which WebGPU accepts as a secure origin. The page&#39;s own files (about 20 MB for phonon-tts and kokoro-js) came through that tunnel on the first visit.</li>
+<li>Kokoro 82M did not finish on the iPhone. Its first visit and one cold run finished, with first audio after 2.0 s, and then Safari closed the tab on every load (&quot;A problem repeatedly occurred&quot;). Its fp32 model is 326 MB. The iPhone ran it on its own, after the three Phonon runtimes, because a crashed tab stops the page.</li>
+<li>On the iPhone, phonon-tts on the CPU ran on 1 thread in 5 of its 21 runs: its worker threads failed to start with &quot;Out of memory&quot;, and it went on without them.</li>
+</ul>
+<h3 id="open-work">Open work</h3>
+<ul>
+<li>Fewer dispatches: folding the noise into the flow head&#39;s input GEMV, and the end-of-speech, output and latent projections into one workgroup, should give 3-6%.</li>
+<li>Faster codec convolutions: wider tiles per thread, and direct kernels for the last convolution (1 output channel) and <code>s3r1</code> (32 channels).</li>
+<li>Text normalization of numbers and symbols, as phonon-tts does.</li>
+</ul>
+</div></section>
+<section class="doc" id="method"><div><h2>Method</h2></div><div class="body"><div class="table"><table>
+<thead>
+<tr>
+<th>Device</th>
+<th>Browser</th>
+<th>Note</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>MacBook Pro, Apple M3 Max</td>
+<td>Chrome 153, headless</td>
+<td>Metal 3, 32-lane subgroups</td>
+</tr>
+<tr>
+<td>PC, NVIDIA RTX 2080 Ti, AMD Ryzen 7 3700X, Windows 11</td>
+<td>Chrome 156, headless</td>
+<td>Turing, 32-lane subgroups</td>
+</tr>
+<tr>
+<td>iPhone 17 Pro (A19 Pro)</td>
+<td>Safari 27.2</td>
+<td>Safari reports 4 CPU cores</td>
+</tr>
+</tbody></table></div>
+<ul>
+<li>Texts: the 10 Harvard sentences of list 1 (IEEE, 1969) and the first paragraph of the Rainbow Passage (Fairbanks, 1960), in <a href="https://github.com/blixt/phonon/blob/main/bench/phrases.json">bench/phrases.json</a>.</li>
+<li>Runtimes: blixt/phonon, phonon-tts 0.6.0 on WebGPU and on the CPU (3 threads, <code>q8</code> weights, no text normalization so that both Phonon runtimes do the same work), and kokoro-js 1.2.1 with Kokoro 82M in fp32 on WebGPU. Both Phonon runtimes use the same model revision and the voice Delia. Kokoro uses <code>af_heart</code>.</li>
+<li>Runs: a fresh browser profile, one first visit per runtime, then 10 rounds of cold runs and 10 rounds of warm runs. Each round runs every runtime once, in an order that rotates each round. A cold run is a fresh page that loads the runtime and speaks the first Harvard sentence. A warm run is a fresh page that loads the runtime, speaks one untimed sentence, then speaks all 11 texts with that round&#39;s seed. The Mac and the PC each waited until their CPU was under 15% and their GPU under 10% for a minute before they started (<a href="https://github.com/blixt/phonon/blob/main/bench/wait-quiet.sh">bench/wait-quiet.sh</a> on the Mac). The iPhone ran with Safari in the foreground.</li>
+<li>First audio is the time from the call to the first chunk of audio.</li>
+</ul>
+<p>To run it again:</p>
+<pre><code class="language-sh">npm install
+npm run build
+node bench/run.mjs                                  # serves the page and plans the runs
+node bench/drive.mjs &quot;http://127.0.0.1:7893/bench/?device=mac&quot;   # or open that page on a device
+python bench/plots.py &amp;&amp; python bench/table.py      # figures and table
+</code></pre>
+</div></section>
+<section class="doc" id="limits"><div><h2>Limits</h2></div><div class="body"><ul>
+<li>The browser must have WebGPU.</li>
+<li>Only English: blixt/phonon runs the 31M English model, which is Apache-2.0. Gradium&#39;s 40M models are CC BY-NC 4.0, and blixt/phonon does not load them.</li>
+<li>phonon-tts can write out numbers, amounts and symbols as words before it speaks. blixt/phonon cannot, and numbers read best written as words.</li>
+<li>The word times follow the model&#39;s attention. They are not a forced alignment.</li>
+</ul>
+</div></section>
+<section class="doc" id="credits-and-license"><div><h2>Credits and license</h2></div><div class="body"><p>The model, its tokenizer and its voices are by <a href="https://gradium.ai">Gradium</a>, under the Apache License 2.0. Phonon builds on <a href="https://github.com/kyutai-labs/pocket-tts">Pocket TTS</a> and the Mimi codec by <a href="https://kyutai.org">Kyutai</a>. This repository does not include the model. The code downloads Gradium&#39;s tokenizer and voices from Hugging Face at pinned revisions, and the converted weights from <a href="https://huggingface.co/blixt/phonon-31m-en-webgpu">blixt/phonon-31m-en-webgpu</a>, which credits Gradium.</p>
+<p>The code in this repository is under the <a href="https://github.com/blixt/phonon/tree/main/LICENSE">Apache License 2.0</a>. See <a href="https://github.com/blixt/phonon/tree/main/NOTICE">NOTICE</a>.</p>
+</div></section>
 </div>
-<p id="status">Loading the model…</p>
-<p id="words"></p>
-<p><a href="listen.html">Listen to the benchmark phrases side by side</a> · <a href="https://github.com/blixt/phonon">Source</a></p>
-<script type="module" src="demo.js"></script>
+</main>
+<footer class="foot wrap">
+  <span><a href="https://github.com/blixt/phonon">github.com/blixt/phonon</a> · Apache-2.0</span>
+  <span>The model, tokenizer and voices are by <a href="https://gradium.ai">Gradium</a></span>
+</footer>
+<script type="module" src="site.js"></script>
+</body>
 </html>

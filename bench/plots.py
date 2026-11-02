@@ -62,7 +62,13 @@ for dev in devices:
             "coldPageMs": stat([r["pageMs"] for r in d["cold"]]),
             "firstVisitMs": stat([r["loadMs"] + r["phrases"][0]["firstMs"] for r in d["first"]]),
         }
-json.dump(summary, open(os.path.join(HERE, "..", "docs", "results.json"), "w"), indent=1)
+# What the web page's charts draw beyond the medians: each warm phrase (seconds of speech,
+# × real time), the word timing errors and the quality scores.
+summary["phrases"] = {dev: {rt: [[round(p["audioSecs"], 2), round(p["audioSecs"] / (p["totalMs"] / 1000), 1), p["id"]] for p in warm_phrases(dev, rt)] for rt, _ in RUNTIMES if warm_phrases(dev, rt)} for dev in devices}
+for name, key in [("timing-summary.json", "timing"), ("quality-mac.json", "quality")]:
+    f = os.path.join(HERE, "results", name)
+    if os.path.exists(f): summary[key] = {k: v for k, v in json.load(open(f)).items() if k != "heard"}
+json.dump(summary, open(os.path.join(HERE, "..", "docs", "results.json"), "w"), separators=(",", ":"))
 
 def grouped(metric, title, ylabel, fname, log=True, fmt="{:.0f}"):
     fig, ax = plt.subplots(figsize=(7.2, 3.9))

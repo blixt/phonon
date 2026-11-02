@@ -21,21 +21,20 @@ for p in phrases:
     rows.append(f"<tr><th>{html.escape(p['text'])}</th>{''.join(cells)}</tr>")
 heads = "".join(f"<th>{n}<br><small>{d}</small></th>" for _, n, d in RUNTIMES)
 page = f"""<!doctype html>
-<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Phonon on WebGPU: listen</title>
-<style>
-body {{ font: 15px/1.45 system-ui, sans-serif; margin: 1.5rem; color: #1d1d1f; }}
-table {{ border-collapse: collapse; }} td, th {{ padding: 0.4rem; border-bottom: 1px solid #ddd; vertical-align: middle; text-align: left; }}
-tbody th {{ font-weight: normal; max-width: 22rem; }} audio {{ width: 13rem; }} small {{ font-weight: normal; color: #6e6e73; }}
-@media (prefers-color-scheme: dark) {{ body {{ background: #111; color: #eee; }} td, th {{ border-color: #333; }} }}
-</style>
-<h1>Listen: the benchmark phrases</h1>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>blixt/phonon: listen to the benchmark phrases</title>
+<link rel="stylesheet" href="style.css"></head>
+<body>
+<header class="top wrap"><a class="mark" href="index.html">blixt/phonon</a>
+<nav><a href="index.html#demo">Try it</a><a href="index.html#results">Results</a><a class="gh" href="https://github.com/blixt/phonon">GitHub</a></nav></header>
+<main class="wrap lp">
+<h1>Listen to the benchmark phrases</h1>
 <p>Each clip is the first warm run on the MacBook Pro (M3 Max) in Chrome. The three Phonon runtimes use the same model and voice. They sample with different random numbers, so each clip is a different take of the same text. Kokoro is a different model, for reference.</p>
-<p><a href="index.html">Try it with your own text</a> · <a href="https://github.com/blixt/phonon">Source</a></p>
-<table><thead><tr><th>Text</th>{heads}</tr></thead><tbody>
+<div class="table"><table><thead><tr><th>Text</th>{heads}</tr></thead><tbody>
 {''.join(rows)}
-</tbody></table>
-</html>
+</tbody></table></div>
+</main>
+</body></html>
 """
 open(os.path.join(DOCS, "listen.html"), "w").write(page)
 print("wrote", len(rows), "rows")
