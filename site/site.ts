@@ -537,7 +537,7 @@ async function demo(redrawBars: () => void) {
       const live = () => {
         const took = performance.now() - t0;
         set("s-speed", `${Math.round(made / (took / 1000))}×`);
-        set("s-audio", `${made.toFixed(1)} s`, `made in ${ms(took)}`);
+        set("s-audio", `${made.toFixed(1)} s`, `in ${ms(took)}`);
       };
       $("s-speed").classList.add("live");
       const speech = await p.speak($<HTMLTextAreaElement>("text").value, {
