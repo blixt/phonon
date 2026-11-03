@@ -28,8 +28,10 @@ export function serve({ root, port = 0, host = "127.0.0.1", hub = process.env.HF
       try {
         const s = await stat(file);
         if (!s.isFile()) throw new Error();
-        // Pages revalidate; code and data stay in the browser's cache, as a deployed site's would.
-        const cache = extname(file) === ".html" ? "no-cache" : "max-age=86400";
+        // The benchmark's own page and script are always fetched, so a device never runs an old
+        // plan. Pages revalidate, and the runtimes' code and data stay in the browser's cache, as a
+        // deployed site's would.
+        const cache = file.includes("/bench/") ? "no-store" : extname(file) === ".html" ? "no-cache" : "max-age=86400";
         res.writeHead(200, { ...headers, "cache-control": cache, "content-type": TYPES[extname(file)] ?? "application/octet-stream", "content-length": s.size });
         res.end(await readFile(file));
       } catch { res.writeHead(404, headers); res.end(); }

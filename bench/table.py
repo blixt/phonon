@@ -11,12 +11,13 @@ def first_visit(x):
     s = x.get("firstVisitMs")
     if not s: return "did not finish" if x["errors"] else "–"
     return f"{s['median'] / 1000:.1f}"
-lines = ["| Device | Runtime | Speed (× real time) | First audio, warm (ms) | Cold start (ms) | First visit (s) | All 11 phrases, warm (s) |", "|---|---|--:|--:|--:|--:|--:|"]
+lines = ["| Device | Runtime | Speed (× real time) | First audio, warm (ms) | Cold start (ms) | First visit at 50 Mbit/s (s) | Download (MB) | All 11 phrases, warm (s) |", "|---|---|--:|--:|--:|--:|--:|--:|"]
 for dev, d in r["devices"].items():
     for rt, name in NAMES.items():
         x = r["results"].get(dev, {}).get(rt)
         if x is None: continue
-        lines.append(f"| {d['label']} | {name} | {m(x['warmRealtime'])} | {m(x['warmFirstMs'], '{:.1f}')} | {m(x['coldStartMs'])} | {first_visit(x)} | {m(x['warmTotalSecs'], '{:.1f}')} |")
+        mb = f"{x['firstVisitMB']['median']:.1f}" if x.get("firstVisitMB") else "–"
+        lines.append(f"| {d['label']} | {name} | {m(x['warmRealtime'])} | {m(x['warmFirstMs'], '{:.1f}')} | {m(x['coldStartMs'])} | {first_visit(x)} | {mb} | {m(x['warmTotalSecs'], '{:.1f}')} |")
 readme = os.path.join(HERE, "..", "README.md")
 text = open(readme).read()
 start, end = "<!-- results:start -->", "<!-- results:end -->"

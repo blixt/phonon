@@ -2,7 +2,7 @@
 
 Fast text-to-speech in the browser, with a start and end time for every word.
 
-[Try it in your browser](https://blixt.xyz/phonon/) (downloads 43.7 MB the first time) · [Listen to the benchmark phrases](https://blixt.xyz/phonon/listen.html)
+[Try it in your browser](https://blixt.xyz/phonon/) (downloads 44.3 MB the first time) · [Listen to the benchmark phrases](https://blixt.xyz/phonon/listen.html)
 
 ## What it does
 
@@ -19,7 +19,7 @@ Against Gradium's own browser package, [phonon-tts](https://www.npmjs.com/packag
 - Speed: 115× real time against 31× on an M3 Max, 73× against 21× on an RTX 2080 Ti, and 26× against 13× on an iPhone 17 Pro.
 - First audio of a sentence: 3 ms against 15 ms on the M3 Max, and 11 ms against 44 ms on the iPhone.
 - A fresh page with the model cached: first audio after 46 ms against 373 ms on the M3 Max.
-- First visit: 43.7 MB to download against 64.5 MB. First audio after 2.9 s against 3.5 s on the M3 Max, and 9.7 s against 18.2 s on the iPhone.
+- First visit: 44.3 MB to download against 66.8 MB. With the download at 50 Mbit/s, first audio after 7.2 s against 10.9 s on the M3 Max, and 7.3 s against 11.3 s on the iPhone.
 - Word times: phonon-tts gives none.
 - Speech quality: Whisper heard no word errors in 110 clips, against 0.22% for phonon-tts. Speaker similarity is the same, and UTMOS predicts 4.40 for both.
 
@@ -32,23 +32,23 @@ Against Gradium's own browser package, [phonon-tts](https://www.npmjs.com/packag
 ![Cold start](docs/figures/cold-start.svg)
 
 <!-- results:start -->
-| Device | Runtime | Speed (× real time) | First audio, warm (ms) | Cold start (ms) | First visit (s) | All 11 phrases, warm (s) |
-|---|---|--:|--:|--:|--:|--:|
-| MacBook Pro, M3 Max | **blixt/phonon** | 115 | 3.2 | 46 | 2.9 | 0.4 |
-| MacBook Pro, M3 Max | phonon-tts, WebGPU | 31 | 14.9 | 373 | 3.5 | 1.8 |
-| MacBook Pro, M3 Max | phonon-tts, CPU | 15 | 9.8 | 324 | – | 3.9 |
-| MacBook Pro, M3 Max | Kokoro 82M, WebGPU | 14 | 207.4 | 847 | 12.0 | 4.1 |
-| PC, RTX 2080 Ti | **blixt/phonon** | 73 | 6.1 | 177 | 3.3 | 0.7 |
-| PC, RTX 2080 Ti | phonon-tts, WebGPU | 21 | 26.5 | 702 | 4.4 | 2.7 |
-| PC, RTX 2080 Ti | phonon-tts, CPU | 6 | 25.5 | 569 | – | 10.1 |
-| PC, RTX 2080 Ti | Kokoro 82M, WebGPU | 11 | 271.7 | 2022 | 15.5 | 5.2 |
-| iPhone 17 Pro, Safari 27.2 | **blixt/phonon** | 26 | 10.7 | 147 | 9.7 | 2.1 |
-| iPhone 17 Pro, Safari 27.2 | phonon-tts, WebGPU | 13 | 43.8 | 550 | 18.2 | 5.1 |
-| iPhone 17 Pro, Safari 27.2 | phonon-tts, CPU | 6 | 31.2 | 568 | – | 10.5 |
-| iPhone 17 Pro, Safari 27.2 | Kokoro 82M, WebGPU | did not finish | did not finish | did not finish | did not finish | did not finish |
+| Device | Runtime | Speed (× real time) | First audio, warm (ms) | Cold start (ms) | First visit at 50 Mbit/s (s) | Download (MB) | All 11 phrases, warm (s) |
+|---|---|--:|--:|--:|--:|--:|--:|
+| MacBook Pro, M3 Max | **blixt/phonon** | 115 | 3.2 | 46 | 7.2 | 44.3 | 0.4 |
+| MacBook Pro, M3 Max | phonon-tts, WebGPU | 31 | 14.9 | 373 | 10.9 | 66.8 | 1.8 |
+| MacBook Pro, M3 Max | phonon-tts, CPU | 15 | 9.8 | 324 | 10.9 | 66.8 | 3.9 |
+| MacBook Pro, M3 Max | Kokoro 82M, WebGPU | 14 | 207.4 | 847 | 54.1 | 331.1 | 4.1 |
+| PC, RTX 2080 Ti | **blixt/phonon** | 73 | 6.1 | 177 | 7.3 | 44.3 | 0.7 |
+| PC, RTX 2080 Ti | phonon-tts, WebGPU | 21 | 26.5 | 702 | 11.3 | 66.8 | 2.7 |
+| PC, RTX 2080 Ti | phonon-tts, CPU | 6 | 25.5 | 569 | 11.1 | 66.8 | 10.1 |
+| PC, RTX 2080 Ti | Kokoro 82M, WebGPU | 11 | 271.7 | 2022 | 55.5 | 330.0 | 5.2 |
+| iPhone 17 Pro, Safari 27.2 | **blixt/phonon** | 26 | 10.7 | 147 | 7.3 | 44.3 | 2.1 |
+| iPhone 17 Pro, Safari 27.2 | phonon-tts, WebGPU | 13 | 43.8 | 550 | 11.3 | 66.8 | 5.1 |
+| iPhone 17 Pro, Safari 27.2 | phonon-tts, CPU | 6 | 31.2 | 568 | 12.0 | 66.8 | 10.5 |
+| iPhone 17 Pro, Safari 27.2 | Kokoro 82M, WebGPU | did not finish | did not finish | did not finish | did not finish | – | did not finish |
 <!-- results:end -->
 
-Each value is a median, and the bars show the 25th and 75th percentiles. Speed is seconds of speech per second of compute, over every phrase of every warm run: 30× means that 10 seconds of speech take about a third of a second to make. Cold start is a fresh page that loads the runtime and speaks one sentence, with the files already in the browser's cache. First visit is the same with nothing cached, which includes the download from Hugging Face over the machine's normal internet connection. Kokoro's first audio is its whole first sentence, because the benchmark gives it one sentence per call. phonon-tts on the CPU has no First visit: it reads the weights file that phonon-tts on WebGPU downloaded just before it.
+Each value is a median, and the bars show the 25th and 75th percentiles. Speed is seconds of speech per second of compute, over every phrase of every warm run: 30× means that 10 seconds of speech take about a third of a second to make. Cold start is a fresh page that loads the runtime and speaks one sentence, with the files already in the browser's cache. First visit is the same on a page that first deletes everything its site stores, so it downloads every file, and it is given at 50 Mbit/s: the time any download was running is replaced by the bytes the visit downloaded at that speed. A first visit is otherwise mostly download time, which depends on the connection, not on the runtime. Its bytes are what came over the network (Download in the table) and each runtime's own code at its gzip size, as a static host serves it. Kokoro's first audio is its whole first sentence, because the benchmark gives it one sentence per call.
 
 blixt/phonon gets faster as texts get longer, because each text has a fixed cost before its first frame. The other runtimes stay near one speed:
 
@@ -86,7 +86,7 @@ const speech = await tts.speak("The birch canoe slid on the smooth planks.", {
 // speech.tokens: the same for each token
 ```
 
-`Phonon.load` throws when the browser has no WebGPU. The first load downloads 43.7 MB from Hugging Face, and later loads read it from the browser's cache.
+`Phonon.load` throws when the browser has no WebGPU. The first load downloads 44.3 MB from Hugging Face (the weights, the tokenizer and a voice), and later loads read them from the browser's cache.
 
 The code is in [src](src): [kernels.ts](src/kernels.ts) has the WGSL shaders, [lm.ts](src/lm.ts) the language model, [codec.ts](src/codec.ts) the audio decoder, [engine.ts](src/engine.ts) the loop that drives them and [timing.ts](src/timing.ts) the word times.
 
@@ -169,8 +169,8 @@ Speed uses the model's `duration_delta` condition. The engine computes the condi
 - `kokoro-js` `stream()` never returned on a plain string here. The benchmark calls `generate` once per sentence.
 - Headless WebKit with an in-memory profile keeps no Cache Storage between workers. Use a profile on disk.
 - Playwright drops the page when a route fulfils a 100 MB body in Chromium. The benchmark redirects to a local server instead.
-- The PC could not reach the Mac over Tailscale (a shared node is one-way). An SSH tunnel carried the page and Chrome's debugging port, and the page loaded as `localhost`, which WebGPU accepts as a secure origin. The page's own files (about 20 MB for phonon-tts and kokoro-js) came through that tunnel on the first visit.
-- Kokoro 82M did not finish on the iPhone. Its first visit and one cold run finished, with first audio after 2.0 s, and then Safari closed the tab on every load ("A problem repeatedly occurred"). Its fp32 model is 326 MB. The iPhone ran it on its own, after the three Phonon runtimes, because a crashed tab stops the page.
+- The PC could not reach the Mac over Tailscale (a shared node is one-way). An SSH tunnel carried the page and Chrome's debugging port, and the page loaded as `localhost`, which WebGPU accepts as a secure origin.
+- Kokoro 82M did not finish on the iPhone. A first visit and a cold run each finished once. After that, Safari either closed the tab on load ("A problem repeatedly occurred") or the page stopped before its first audio. Its fp32 model is 326 MB. The iPhone ran it on its own, after the three Phonon runtimes, because a crashed tab stops the page.
 - On the iPhone, phonon-tts on the CPU ran on 1 thread in 5 of its 21 runs: its worker threads failed to start with "Out of memory", and it went on without them.
 
 ### Open work
@@ -189,7 +189,8 @@ Speed uses the model's `duration_delta` condition. The engine computes the condi
 
 - Texts: the 10 Harvard sentences of list 1 (IEEE, 1969) and the first paragraph of the Rainbow Passage (Fairbanks, 1960), in [bench/phrases.json](bench/phrases.json).
 - Runtimes: blixt/phonon, phonon-tts 0.6.0 on WebGPU and on the CPU (3 threads, `q8` weights, no text normalization so that both Phonon runtimes do the same work), and kokoro-js 1.2.1 with Kokoro 82M in fp32 on WebGPU. Both Phonon runtimes use the same model revision and the voice Delia. Kokoro uses `af_heart`.
-- Runs: a fresh browser profile, one first visit per runtime, then 10 rounds of cold runs and 10 rounds of warm runs. Each round runs every runtime once, in an order that rotates each round. A cold run is a fresh page that loads the runtime and speaks the first Harvard sentence. A warm run is a fresh page that loads the runtime, speaks one untimed sentence, then speaks all 11 texts with that round's seed. The Mac and the PC each waited until their CPU was under 15% and their GPU under 10% for a minute before they started ([bench/wait-quiet.sh](bench/wait-quiet.sh) on the Mac). The iPhone ran with Safari in the foreground.
+- Runs: 10 rounds of first visits, then 10 rounds of cold runs and 10 rounds of warm runs. Each round runs every runtime once, in an order that rotates each round. One untimed cold run per runtime fills the caches again before the cold runs.
+- First visits: before each one, the page deletes its site's Cache Storage, IndexedDB and origin private file system. Every fetch to another origin, in the page and in its workers, goes past the HTTP cache, and [bench/netcount.js](bench/netcount.js) records its bytes and when its first and last byte came. The runtimes' code comes from the benchmark server, and the analysis counts it at its gzip size. After each first visit, a 16 MB download from Hugging Face measures the connection. A cold run is a fresh page that loads the runtime and speaks the first Harvard sentence. A warm run is a fresh page that loads the runtime, speaks one untimed sentence, then speaks all 11 texts with that round's seed. The Mac and the PC each waited until their CPU was under 15% and their GPU under 10% for a minute before they started ([bench/wait-quiet.sh](bench/wait-quiet.sh) on the Mac). The iPhone ran with Safari in the foreground.
 - First audio is the time from the call to the first chunk of audio.
 
 To run it again:

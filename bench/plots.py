@@ -30,13 +30,33 @@ for f in sorted(glob.glob(os.path.join(HERE, "results", "*.jsonl"))):
         if only and t["runtime"].lower() != only: continue
         d = data.setdefault(dev, {}).setdefault(t["runtime"], {"cold": [], "warm": [], "first": [], "errors": []})
         if res.get("error"): d["errors"].append(res["error"][:300]); continue
-        d["first" if t["run"] == 0 else t["kind"]].append(res)
+        # First visits are their own tasks. A cold run 0 only fills the caches after them.
+        if t["kind"] == "first": d["first"].append(res)
+        elif t["run"] > 0: d[t["kind"]].append(res)
 devices = [d for d in DEVICES if d in data]
-# A runtime with no warm run on a device did not finish there: its few cold runs are no median.
+# A runtime with no warm run on a device did not finish there: its few other runs are no median.
 for dev in devices:
     for rt, d in data[dev].items():
         if not d["warm"]:
             data[dev][rt] = {"cold": [], "warm": [], "first": [], "errors": d["errors"] or ["did not finish"]}
+
+# A first visit is mostly its download, so its time depends on the connection more than on the
+# runtime. Each one is compared at one reference speed: the time any download was running is
+# replaced by its bytes at REFERENCE_MBIT. Its bytes are what came from other origins (as sent on
+# the network) and each runtime's own code at its gzip size, as a static host would serve it.
+REFERENCE_MBIT = 50
+_gzip = {}
+def code_bytes(paths):
+    import gzip
+    for p in paths:
+        if p not in _gzip:
+            f = os.path.join(HERE, "..", p.lstrip("/"))
+            _gzip[p] = len(gzip.compress(open(f, "rb").read(), 9)) if os.path.exists(f) else 0
+    return sum(_gzip[p] for p in paths)
+def first_visit(r):
+    d = r["downloads"]
+    total = d["wireBytes"] + code_bytes(d["code"])
+    return {"ms": r["loadMs"] + r["phrases"][0]["firstMs"] - d["ms"] + total * 8 / (REFERENCE_MBIT * 1e6) * 1000, "measuredMs": r["loadMs"] + r["phrases"][0]["firstMs"], "bytes": total}
 
 def warm_phrases(dev, rt):
     return [p for r in data[dev].get(rt, {}).get("warm", []) for p in r["phrases"]]
@@ -60,9 +80,10 @@ for dev in devices:
             "coldFirstMs": stat([r["phrases"][0]["firstMs"] for r in d["cold"]]),
             "coldStartMs": stat([r["loadMs"] + r["phrases"][0]["firstMs"] for r in d["cold"]]),
             "coldPageMs": stat([r["pageMs"] for r in d["cold"]]),
-            # phonon-tts on the CPU loads the weights file that phonon-tts on WebGPU downloaded just
-            # before it, so it has no first visit of its own.
-            "firstVisitMs": None if rt == "gradiumCpu" else stat([r["loadMs"] + r["phrases"][0]["firstMs"] for r in d["first"]]),
+            "firstVisitMs": stat([first_visit(r)["ms"] for r in d["first"] if r.get("downloads")]),
+            "firstVisitMeasuredMs": stat([first_visit(r)["measuredMs"] for r in d["first"] if r.get("downloads")]),
+            "firstVisitMB": stat([first_visit(r)["bytes"] / 1e6 for r in d["first"] if r.get("downloads")]),
+            "firstVisitNetworkMBps": stat([r["networkMBps"] for r in d["first"] if r.get("networkMBps")]),
         }
 # What the web page's charts draw beyond the medians: each warm phrase (seconds of speech,
 # × real time), the word timing errors and the quality scores.

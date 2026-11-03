@@ -21,10 +21,17 @@ page.on("crash", () => console.log("[crash]"));
 page.on("console", (m) => console.log(`[${m.type()}]`, m.text().slice(0, 300)));
 page.on("requestfailed", (r) => console.log("[failed]", r.url().slice(0, 120), r.failure()?.errorText));
 await page.goto(url);
-// The page reloads itself between runs: read its status every 2 s, through the reloads.
+// The page reloads itself between runs: every 2 s, read its status, and ask the server whether
+// this device's plan is done (a page can finish between two reads of a remote browser).
+const device = new URL(url).searchParams.get("device");
+const serverDone = () =>
+  fetch(new URL("/status", url.replace("localhost", "127.0.0.1")), { method: "POST", body: JSON.stringify({ device }) })
+    .then((r) => r.json())
+    .then((s) => s.done)
+    .catch(() => false);
 for (;;) {
   const status = await page.textContent("#task", { timeout: 5000 }).catch(() => "");
-  if (status?.startsWith("Done")) break;
+  if (status?.startsWith("Done") || (await serverDone())) break;
   await new Promise((r) => setTimeout(r, 2000));
 }
 await (remote ? page.close() : ctx.close());

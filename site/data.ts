@@ -5,7 +5,7 @@ import phrases from "../bench/phrases.json";
 
 export type Stat = { median: number; p25: number; p75: number; n: number } | null;
 export type Metric = "warmRealtime" | "warmFirstMs" | "coldStartMs" | "firstVisitMs";
-type RuntimeResult = { errors: string[] } & Record<Metric, Stat>;
+type RuntimeResult = { errors: string[]; firstVisitMB?: Stat; firstVisitMeasuredMs?: Stat; firstVisitNetworkMBps?: Stat } & Record<Metric, Stat>;
 type Results = {
   results: Record<string, Record<string, RuntimeResult>>;
   phrases: Record<string, Record<string, [number, number, string][]>>;
@@ -18,6 +18,11 @@ export const PHRASES = data.phrases;
 export const TIMING = data.timing;
 export const QUALITY = data.quality;
 export const TEXTS = phrases.phrases;
+/** Megabytes a runtime stores after a first visit (the same files on every device). */
+const mb = (rt: string) => {
+  const s = Object.values(RESULTS).find((d) => d[rt]?.firstVisitMB)?.[rt]?.firstVisitMB;
+  return s ? s.median.toFixed(1) : "?";
+};
 
 export const RUNTIMES = [
   { id: "ours", name: "blixt/phonon", short: "blixt/phonon", note: "WebGPU" },
@@ -38,7 +43,7 @@ export const METRICS: { id: Metric; tab: string; caption: string; unit: Unit }[]
   {
     id: "firstVisitMs",
     tab: "First visit",
-    caption: "Seconds for a fresh page to speak with nothing cached. It downloads 43.7 MB, 64.5 MB (phonon-tts) or 326 MB (Kokoro).",
+    caption: `Seconds for a fresh page with nothing stored to speak, with its download at 50 Mbit/s: ${mb("ours")} MB, ${mb("gradiumWebgpu")} MB (phonon-tts) or ${mb("kokoro")} MB (Kokoro).`,
     unit: "s",
   },
 ];

@@ -1,12 +1,14 @@
 // Runs the benchmark: serves the repository and plans each device's runs. Open
 // `/bench/?device=NAME` on a device (over https, or localhost: WebGPU needs a secure page).
-// First, one first visit per runtime: a fresh page that downloads the model (use a new browser
-// profile, so nothing is cached). Then 10 rounds of cold runs and 10 rounds of warm runs. Each
-// round runs every runtime once, in an order that rotates by round, so slow drifts in machine
-// load spread over all runtimes. Each warm round uses its own seed. Results go to
-// bench/results/NAME.jsonl, and every warm clip of an --audio device to
-// bench/results/audio/NAME/RUNTIME/ID~ROUND.wav.
-// Usage: node bench/run.mjs [--port 7893] [--runs 10] [--runtimes ours,gradiumWebgpu,...] [--audio mac]
+// First, 5 rounds of first visits: a fresh page that deletes all of its origin's storage, fetches
+// past the HTTP cache, loads one runtime and speaks one phrase, so each one downloads its files.
+// Then one untimed cold run per runtime fills the caches again, and 10 rounds of cold runs and 10
+// rounds of warm runs follow. Each round runs every runtime once, in an order that rotates by
+// round, so slow drifts in machine load and network speed spread over all runtimes. Each warm
+// round uses its own seed. Results go to bench/results/NAME.jsonl, and every warm clip of an
+// --audio device to bench/results/audio/NAME/RUNTIME/ID~ROUND.wav.
+// Usage: node bench/run.mjs [--port 7893] [--runs 10] [--first-runs 5] [--kinds first,cold,warm]
+//   [--runtimes ours,gradiumWebgpu,...] [--audio mac]
 import { appendFileSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { serve } from "./serve.mjs";
@@ -18,6 +20,8 @@ const arg = (name, fallback) => {
 const here = dirname(new URL(import.meta.url).pathname);
 const root = join(here, "..");
 const runs = Number(arg("--runs", "10"));
+const firstRuns = Number(arg("--first-runs", "5"));
+const kinds = new Set(arg("--kinds", "first,cold,warm").split(","));
 const runtimes = arg("--runtimes", "ours,gradiumWebgpu,gradiumCpu,kokoro").split(",");
 const audioDevices = new Set(arg("--audio", "mac").split(","));
 const { phrases, cold } = JSON.parse(readFileSync(join(here, "phrases.json"), "utf8"));
@@ -25,17 +29,25 @@ const coldPhrase = phrases.filter((p) => p.id === cold);
 const out = join(here, "results");
 mkdirSync(out, { recursive: true });
 
+/** When each device's page last beat. */
+const beats = new Map();
 /** Each device's plan and where it stands. */
 const devices = new Map();
 function plan(device) {
   const tasks = [];
   const order = (r) => runtimes.map((_, i) => runtimes[(i + r) % runtimes.length]);
-  for (const runtime of runtimes) tasks.push({ runtime, kind: "cold", run: 0, runs, phrases: coldPhrase, prime: true });
-  for (let r = 1; r <= runs; r++)
-    for (const runtime of order(r)) tasks.push({ runtime, kind: "cold", run: r, runs, phrases: coldPhrase });
-  for (let r = 1; r <= runs; r++)
-    for (const runtime of order(r))
-      tasks.push({ runtime, kind: "warm", run: r, runs, phrases, seed: r, saveAudio: audioDevices.has(device) });
+  if (kinds.has("first"))
+    for (let r = 1; r <= firstRuns; r++)
+      for (const runtime of order(r)) tasks.push({ runtime, kind: "first", run: r, runs: firstRuns, phrases: coldPhrase });
+  if (kinds.has("cold") || kinds.has("warm"))
+    for (const runtime of runtimes) tasks.push({ runtime, kind: "cold", run: 0, runs, phrases: coldPhrase, prime: true });
+  if (kinds.has("cold"))
+    for (let r = 1; r <= runs; r++)
+      for (const runtime of order(r)) tasks.push({ runtime, kind: "cold", run: r, runs, phrases: coldPhrase });
+  if (kinds.has("warm"))
+    for (let r = 1; r <= runs; r++)
+      for (const runtime of order(r))
+        tasks.push({ runtime, kind: "warm", run: r, runs, phrases, seed: r, saveAudio: audioDevices.has(device) });
   return tasks.map((t, index) => ({ ...t, id: `${device}-${index}`, index, total: tasks.length }));
 }
 const record = (device, row) => appendFileSync(join(out, `${device}.jsonl`), JSON.stringify({ at: new Date().toISOString(), ...row }) + "\n");
@@ -85,6 +97,16 @@ await serve({
   port,
   onPost(path, body) {
     if (path === "/next") return next(body.device, body);
+    // The page beats every 3 s while it runs: a device whose beats stop has crashed or frozen.
+    if (path === "/beat") {
+      beats.set(body.device, Date.now());
+      return {};
+    }
+    if (path === "/status") {
+      const d = devices.get(body.device);
+      const beat = beats.get(body.device);
+      return { done: !!d && d.at >= d.tasks.length, at: d?.at ?? 0, sinceBeatMs: beat ? Date.now() - beat : null };
+    }
     if (path === "/audio") {
       const dir = join(out, "audio", body.device, body.runtime);
       mkdirSync(dir, { recursive: true });

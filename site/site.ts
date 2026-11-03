@@ -108,10 +108,10 @@ function barChart(frame: HTMLElement) {
     const stat = (g: string, r: string): Stat =>
       g === "you" ? (r === "ours" && own ? { median: own, p25: own, p75: own, n: 1 } : null) : (RESULTS[g]?.[r]?.[metric.id] ?? null);
     const values = groups.flatMap((g) => RUNTIMES.map((r) => stat(g.id, r.id))).filter((s): s is NonNullable<Stat> => !!s);
-    const lo = Math.min(...values.map((s) => s.p25)) / 2.2;
-    const hi = Math.max(...values.map((s) => s.p75)) * 1.15;
-    const y = (v: number) => top + (H - top - bottom) * (1 - Math.log(v / lo) / Math.log(hi / lo));
+    // A linear scale from zero: each tab is one measure, so bar heights compare directly.
+    const hi = Math.max(...values.map((s) => s.p75)) * 1.04;
     const base = H - bottom;
+    const y = (v: number) => Math.min(base - 2, top + (H - top - bottom) * (1 - v / hi));
     const gap = W < 480 ? 14 : 26;
     // This device's group is one bar, but as wide as its label.
     const youW = own ? 80 : 0;
@@ -149,7 +149,12 @@ function barChart(frame: HTMLElement) {
           : failed
             ? "did not finish"
             : "not measured";
-        const extra = g.you ? "<br>your last run" : "";
+        const r0 = RESULTS[g.id]?.[r.id];
+        const extra = g.you
+          ? "<br>your last run"
+          : metric.id === "firstVisitMs" && r0?.firstVisitMeasuredMs && r0.firstVisitNetworkMBps
+            ? `<br>measured ${ms(r0.firstVisitMeasuredMs.median)} at ${r0.firstVisitNetworkMBps.median.toFixed(1)} MB/s`
+            : "";
         hit.onpointerenter = hit.onpointerdown = () =>
           tip.show(`${r.name} · ${g.full}<br>${label}${extra}`, cx, s ? Math.min(y(s.median), y(s.p75)) - 18 : base - 30);
         hit.onpointerleave = () => tip.hide();
@@ -371,7 +376,7 @@ async function demo(redrawBars: () => void) {
       const p = await Phonon.load({
         progress: (percent) => {
           downloaded = true;
-          set("s-load", `${percent}%`, "of 43.7 MB");
+          set("s-load", `${percent}%`, "of the model");
         },
       });
       const loaded = performance.now() - t0;
@@ -379,7 +384,9 @@ async function demo(redrawBars: () => void) {
       voice.value = "Delia";
       // As the benchmark measures it: load the runtime, then the first audio of a text.
       const start = loaded + (await warmUp(p));
-      mine[downloaded ? "firstVisitMs" : "coldStartMs"] = start;
+      // A first visit here depends on this connection, and the chart's are at 50 Mbit/s: only a
+      // cold start joins the chart.
+      if (!downloaded) mine.coldStartMs = start;
       set("s-load", ms(start), downloaded ? "first visit" : "cold start");
       redrawBars();
       tts = p;
