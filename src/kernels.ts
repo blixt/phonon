@@ -5,7 +5,7 @@
 // configuration, so loops and branches on its constants fold away. Every kernel touches all of
 // its bindings (`_ = &x;`) and declares them all, because gpu.ts builds each pipeline's layout
 // from those declarations.
-import { Q8_GROUP, STATE, type Act, type Align, type Cache, type ConvShape, type Gate, type Residual } from "./graph";
+import { Q8_GROUP, STATE, type Act, type AlignRows, type Cache, type ConvShape, type Gate, type Residual } from "./graph";
 export { STATE };
 /** Each kernel's uniform fields, in order: its WGSL struct and the values gpu.ts writes. */
 export const UNIFORMS = {
@@ -713,7 +713,7 @@ export function attnSplit({
   theta: string;
   sg: boolean;
   /** Keep the alignment head's scores over the text, for word times. */
-  align?: Align;
+  align?: AlignRows;
 }): string {
   const pack = (v: string) => `vec2<u32>(pack2x16float(${v}.xy), pack2x16float(${v}.zw))`;
   return `${sg ? "enable subgroups;" : ""}
@@ -817,7 +817,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
 
 /** Frame 0's alignment row, in the prefill after the alignment layer's attention: the alignment
  *  head's scores of the BOS row (the last text row, at the state's position) over the text. */
-export function alignRow({ lo, head }: Align): string {
+export function alignRow({ lo, head }: AlignRows): string {
   return `
 @group(0) @binding(0) var<storage, read> qb: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read> kc: array<vec2<u32>>;

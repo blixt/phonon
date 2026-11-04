@@ -11,7 +11,7 @@ import { serve } from "./serve.mjs";
 const root = join(new URL(".", import.meta.url).pathname, "..");
 const [model = "phonon-31m-en", profile = join(tmpdir(), "phonon-ops")] = process.argv.slice(2);
 mkdirSync(join(root, ".test"), { recursive: true });
-await build({ entryPoints: [join(root, "bench/ops.ts")], bundle: true, format: "esm", target: "es2022", outfile: join(root, ".test/ops.js"), logLevel: "warning" });
+await build({ entryPoints: [join(root, "bench/ops.ts")], bundle: true, format: "esm", target: "es2022", outfile: join(root, ".test/ops.js"), logLevel: "warning", define: { __PROFILE__: "false" } });
 await build({ entryPoints: [join(root, "src/files.ts")], bundle: true, format: "esm", target: "es2022", outfile: join(root, ".test/files.js"), logLevel: "warning" });
 const { server, url } = await serve({ root });
 const pw = createRequire(process.env.PLAYWRIGHT ?? import.meta.url)("playwright-core");

@@ -88,11 +88,11 @@ export declare class GpuGraph implements G.Graph<GPUBuffer, Op> {
         splits: number;
         theta: string;
         align?: {
-            at: G.Align;
+            at: G.AlignRows;
             buf: GPUBuffer;
         };
     }): Op;
-    alignRow(q: GPUBuffer, kc: GPUBuffer, al: GPUBuffer, at: G.Align): Op;
+    alignRow(q: GPUBuffer, kc: GPUBuffer, al: GPUBuffer, at: G.AlignRows): Op;
     embedRows(ids: GPUBuffer, x: GPUBuffer, rows: number, o: {
         bos: number;
         pad: number;

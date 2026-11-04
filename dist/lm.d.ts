@@ -1,4 +1,5 @@
 import { type Cache, type Encoder, type Graph } from "./graph";
+import type { Align } from "./files";
 export declare const H = 512;
 export declare const PROMPT = 125;
 /** Positions the LM keeps: the voice prompt, the text and the frames. */
@@ -63,10 +64,7 @@ export declare class LanguageModel<B, O> {
     /** The head that follows the text as it speaks (files.ts), its scores kept for word times. */
     private readonly alignLayer;
     private readonly alignAt;
-    constructor(g: Graph<B, O>, depth: number, align: {
-        layer: number;
-        head: number;
-    });
+    constructor(g: Graph<B, O>, depth: number, align: Align);
     /** The layers over `rows` rows from position `pos0`, in the prefill's way, and for a text's
      *  prefill frame 0's alignment row. */
     private layers;

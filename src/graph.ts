@@ -20,8 +20,8 @@ export type Residual = "none" | "add" | "add_y" | "gate" | "gate_y" | "vec";
  *  frame, then the noise seed and its f32 scale (stored as u32 bits). */
 export const STATE = { pos: 0, frame: 1, end: 2, chunk: 3, text: 4, after: 5, seed: 6, scale: 7 } as const;
 /** Where the alignment head's scores go: one row per frame over the text tokens, which start
- *  at position `lo`, `width` floats per row. */
-export interface Align {
+ *  at position `lo`, `width` floats per row, from head `head`. */
+export interface AlignRows {
   lo: number;
   width: number;
   head: number;
@@ -148,10 +148,10 @@ export interface Graph<B, O> {
    *  writes k and v to the cache, and leaves each split's unnormalized output, max and sum in
    *  `parts` ([split][head][66]) for a GEMV to merge (Gemv.combine). With `align`, the alignment
    *  head's scores over the text go to the row of the state's frame. */
-  attnStep(qkv: B, kc: B, vc: B, parts: B, o: { splits: number; theta: string; align?: { at: Align; buf: B } }): O;
+  attnStep(qkv: B, kc: B, vc: B, parts: B, o: { splits: number; theta: string; align?: { at: AlignRows; buf: B } }): O;
   /** Frame 0's alignment row: the alignment head's scores of the BOS row (the last text row, at
    *  the state's position) over the text, from the prefill's q. */
-  alignRow(q: B, kc: B, al: B, at: Align): O;
+  alignRow(q: B, kc: B, al: B, at: AlignRows): O;
   /** Token ids (u32, `bos` and `pad` past any real one) to embedding rows: a text's prefill
    *  (Gate "text"). */
   embedRows(ids: B, x: B, rows: number, o: { bos: number; pad: number }): O;

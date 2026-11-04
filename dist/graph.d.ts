@@ -17,8 +17,8 @@ export declare const STATE: {
     readonly scale: 7;
 };
 /** Where the alignment head's scores go: one row per frame over the text tokens, which start
- *  at position `lo`, `width` floats per row. */
-export interface Align {
+ *  at position `lo`, `width` floats per row, from head `head`. */
+export interface AlignRows {
     lo: number;
     width: number;
     head: number;
@@ -163,13 +163,13 @@ export interface Graph<B, O> {
         splits: number;
         theta: string;
         align?: {
-            at: Align;
+            at: AlignRows;
             buf: B;
         };
     }): O;
     /** Frame 0's alignment row: the alignment head's scores of the BOS row (the last text row, at
      *  the state's position) over the text, from the prefill's q. */
-    alignRow(q: B, kc: B, al: B, at: Align): O;
+    alignRow(q: B, kc: B, al: B, at: AlignRows): O;
     /** Token ids (u32, `bos` and `pad` past any real one) to embedding rows: a text's prefill
      *  (Gate "text"). */
     embedRows(ids: B, x: B, rows: number, o: {

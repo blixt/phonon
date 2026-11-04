@@ -153,11 +153,12 @@ var fortyM = (name, revision, languages, align) => ({
   license: "CC-BY-NC-4.0",
   align
 });
+var SOURCE_31M = { repo: "gradium/phonon-31m-en", revision: "92741c5b07d085ff840e26fea8ce43110b87852f" };
 var MODELS = {
   "phonon-31m-en": {
-    source: { repo: "gradium/phonon-31m-en", revision: "92741c5b07d085ff840e26fea8ce43110b87852f" },
+    source: SOURCE_31M,
     weights: hubFile("blixt/phonon-31m-en-webgpu", "f4635a6dddaa6072451e0155c03c97fbe889b6ec", "phonon-31m-en.int8.bin"),
-    tokenizer: "tokenizer.5.0.0.json",
+    tokenizer: hubFile(SOURCE_31M.repo, SOURCE_31M.revision, "tokenizer.5.0.0.json"),
     languages: ["en"],
     license: "Apache-2.0",
     align: { layer: 3, head: 0, lag: 3 }
@@ -169,11 +170,61 @@ var MODELS = {
   "phonon-40m-pt": fortyM("phonon-40m-pt", "4cbfd742a1555d60eb5399c6d296e9f2e07389e9", ["pt"], { layer: 4, head: 2, lag: 3 }),
   "phonon-40m-multilingual": fortyM("phonon-40m-multilingual", "1537ce46c64f42903e0d608b132ccb073dac46d2", ["en", "fr", "de", "es", "pt"], { layer: 4, head: 1, lag: 3 })
 };
-var tokenizerUrl = (m) => m.tokenizer.startsWith("https:") ? m.tokenizer : hubFile(m.source.repo, m.source.revision, m.tokenizer);
 var VOICES_REPO = "gradium/phonon-voices";
 var VOICES_REVISION = "0ee17205f254b5abc43b266c8a0f215565c352f7";
 var CATALOG_URL = hubFile(VOICES_REPO, VOICES_REVISION, "voices.jsonl");
 var voiceUrl = (id) => hubFile(VOICES_REPO, VOICES_REVISION, `voices/${id}.safetensors`);
+
+// src/cache.ts
+async function open() {
+  try {
+    return await caches.open(MODEL_CACHE);
+  } catch {
+    return null;
+  }
+}
+async function lookup(key) {
+  try {
+    return await (await open())?.match(key);
+  } catch {
+    return void 0;
+  }
+}
+async function store(key, body) {
+  try {
+    await (await open())?.put(key, new Response(body));
+  } catch {
+  }
+}
+async function download(url, progress) {
+  const response = await fetch(url);
+  if (!response.ok || !response.body) throw new Error(`The voice model could not download (${response.status}).`);
+  const total = Number(response.headers.get("content-length")) || 0;
+  const parts2 = [];
+  let loaded = 0;
+  const reader = response.body.getReader();
+  for (; ; ) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts2.push(value);
+    loaded += value.byteLength;
+    if (total && progress) progress(Math.min(100, Math.round(loaded / total * 100)));
+  }
+  const bytes = new Uint8Array(loaded);
+  let o = 0;
+  for (const p of parts2) {
+    bytes.set(p, o);
+    o += p.byteLength;
+  }
+  return bytes;
+}
+async function cached(url, progress) {
+  const hit = await lookup(url);
+  if (hit) return hit.arrayBuffer();
+  const bytes = await download(url, progress);
+  await store(url, bytes);
+  return bytes.buffer;
+}
 
 // src/lm.ts
 var H2 = 512;
@@ -670,8 +721,8 @@ var PhononEngine = class {
       const job = inflight.shift();
       await job.ready;
       const m = job.stage.range();
-      const keep2 = new Uint32Array(m, 0, 4)[STATE.end];
-      if (end === null && keep2) end = Math.min(keep2, maxFrames);
+      const keep = new Uint32Array(m, 0, 4)[STATE.end];
+      if (end === null && keep) end = Math.min(keep, maxFrames);
       if (end === null && job.n >= maxFrames) end = maxFrames;
       const r1 = Math.min(job.n, end ?? Infinity);
       if (onRows && r1 > job.r0) {
@@ -807,7 +858,7 @@ function cacheParts(cache) {
 function ropeKV({ theta, cache }) {
   const { kv16, at, gate, slot: slotOf } = cacheParts(cache);
   const slot = slotOf("pos");
-  const store = kv16 ? `let kw = (${slot} * 512u + h * 64u) / 2u + t;
+  const store2 = kv16 ? `let kw = (${slot} * 512u + h * 64u) / 2u + t;
   kc[kw] = pack2x16float(vec2<f32>(rot(base + 512u, d0, c0, s0), rot(base + 512u, d1, c1, s1)));
   vc[kw] = pack2x16float(vec2<f32>(qkv[base + 1024u + d0], qkv[base + 1024u + d1]));` : `let kb = ${slot} * 512u + h * 64u;
   kc[kb + d0] = rot(base + 512u, d0, c0, s0); kc[kb + d1] = rot(base + 512u, d1, c1, s1);
@@ -840,7 +891,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let c0 = cos(a0); let s0 = sin(a0); let c1 = cos(a1); let s1 = sin(a1);
   qb[m * 512u + h * 64u + d0] = rot(base, d0, c0, s0);
   qb[m * 512u + h * 64u + d1] = rot(base, d1, c1, s1);
-  ${store}
+  ${store2}
 }`;
 }
 function attention({ cache }) {
@@ -1994,57 +2045,28 @@ var Tokenizer = class {
 };
 
 // src/index.ts
-async function openCache() {
+async function startGpu(adapter, packed, align) {
+  const subgroups = subgroups32(adapter);
+  const device = await adapter.requestDevice({ requiredFeatures: subgroups ? ["subgroups"] : [] });
   try {
-    return await caches.open(MODEL_CACHE);
-  } catch {
-    return null;
+    const model = unpackModel(packed);
+    const engine = new PhononEngine(new GpuGraph(device, model, subgroups), withoutWeights(model), align);
+    await engine.ready();
+    return { engine, backend: { name: "webgpu" }, lost: device.lost, close: async () => device.destroy() };
+  } catch (error) {
+    device.destroy();
+    throw error;
   }
 }
-async function keep(cache, url, bytes) {
-  try {
-    await cache?.put(url, new Response(bytes));
-  } catch {
-  }
-}
-async function download(url, progress) {
-  const response = await fetch(url);
-  if (!response.ok || !response.body)
-    throw new Error(`The voice model could not download (${response.status}).`);
-  const total = Number(response.headers.get("content-length")) || 0;
-  const parts2 = [];
-  let loaded = 0;
-  const reader = response.body.getReader();
-  for (; ; ) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    parts2.push(value);
-    loaded += value.byteLength;
-    if (total && progress) progress(Math.min(100, Math.round(loaded / total * 100)));
-  }
-  const bytes = new Uint8Array(loaded);
-  let o = 0;
-  for (const p of parts2) {
-    bytes.set(p, o);
-    o += p.byteLength;
-  }
-  return bytes;
-}
-async function cached(url) {
-  const cache = await openCache();
-  const hit = await cache?.match(url);
-  if (hit) return hit.arrayBuffer();
-  const bytes = await download(url);
-  await keep(cache, url, bytes);
-  return bytes.buffer;
-}
-async function weights(m, progress) {
-  const cache = await openCache();
-  const hit = await cache?.match(m.weights);
-  if (hit) return hit.arrayBuffer();
-  const bytes = await download(m.weights, progress);
-  await keep(cache, m.weights, bytes);
-  return bytes.buffer;
+async function startCpu(packed, align, threads) {
+  const { CpuEngine } = await import("./cpu/remote-76VW7A46.js");
+  const engine = await CpuEngine.start(packed, align, threads);
+  return {
+    engine,
+    backend: { name: "cpu", threads: engine.threads, simd: engine.simd },
+    lost: engine.lost,
+    close: () => engine.close()
+  };
 }
 function parts(text, count) {
   if (count(text) <= TEXT_MAX) return [text];
@@ -2064,26 +2086,27 @@ function parts(text, count) {
   return out.map((p) => p.trim()).filter(Boolean);
 }
 var Phonon = class _Phonon {
+  runtime;
   engine;
   tokenizer;
   catalog;
+  /** Frames the alignment head reads ahead of the audio (files.ts). */
+  lag;
+  closed = false;
   /** Settles when the GPU device is lost (a reset), or the CPU's worker stops: load again to go on. */
   lost;
   backend;
-  release;
-  closed = false;
   /** The voice `speak` uses when none is given: the default of the model's first language. */
   defaultVoice;
-  lag;
-  constructor(engine, tokenizer, catalog, languages, lag, lost, backend, release) {
-    this.backend = backend;
-    this.release = release;
-    this.engine = engine;
+  constructor(files, tokenizer, catalog, runtime) {
+    this.runtime = runtime;
+    this.engine = runtime.engine;
+    this.lost = runtime.lost;
+    this.backend = runtime.backend;
     this.tokenizer = tokenizer;
     this.catalog = catalog;
-    this.defaultVoice = DEFAULT_VOICE[languages[0]];
-    this.lag = lag;
-    this.lost = lost;
+    this.lag = files.align.lag;
+    this.defaultVoice = DEFAULT_VOICE[files.languages[0]];
   }
   /** Loads a model: a download the first time, then the browser's cache. It runs on WebGPU
    *  when the browser has an adapter, else on the CPU, in a worker. */
@@ -2093,9 +2116,8 @@ var Phonon = class _Phonon {
     const adapter = backend === "cpu" ? null : await gpu?.requestAdapter({ powerPreference: "high-performance" }).catch(() => null);
     if (!adapter && backend === "webgpu") throw new Error("This browser has no WebGPU.");
     const [packed, tokenizer, catalog] = await Promise.all([
-      weights(files, progress ?? (() => {
-      })),
-      cached(tokenizerUrl(files)).then((b) => new Tokenizer(JSON.parse(new TextDecoder().decode(b)))),
+      cached(files.weights, progress),
+      cached(files.tokenizer).then((b) => new Tokenizer(JSON.parse(new TextDecoder().decode(b)))),
       cached(CATALOG_URL).then(
         (b) => new TextDecoder().decode(b).split("\n").filter(Boolean).map((line) => JSON.parse(line)).filter((v) => files.languages.includes(v.language)).map((v) => ({
           name: v.name,
@@ -2107,32 +2129,15 @@ var Phonon = class _Phonon {
         }))
       )
     ]);
-    const make = (engine, lost, b, release) => new _Phonon(engine, tokenizer, catalog, files.languages, files.align.lag, lost, b, release);
-    if (!adapter) {
-      const { CpuEngine } = await import("./cpu/remote-G27CUOLC.js");
-      const cores = navigator.hardwareConcurrency || 1;
-      const engine = await CpuEngine.start(packed, files.align, threads ?? Math.min(8, cores));
-      const b = { name: "cpu", threads: engine.threads, simd: engine.simd };
-      return make(engine, engine.lost, b, () => engine.close());
-    }
-    const subgroups = subgroups32(adapter);
-    const device = await adapter.requestDevice({ requiredFeatures: subgroups ? ["subgroups"] : [] });
-    try {
-      const unpacked = unpackModel(packed);
-      const engine = new PhononEngine(new GpuGraph(device, unpacked, subgroups), withoutWeights(unpacked), files.align);
-      await engine.ready();
-      return make(engine, device.lost, { name: "webgpu" }, async () => device.destroy());
-    } catch (error) {
-      device.destroy();
-      throw error;
-    }
+    const runtime = adapter ? await startGpu(adapter, packed, files.align) : await startCpu(packed, files.align, threads ?? Math.min(8, navigator.hardwareConcurrency || 1));
+    return new _Phonon(files, tokenizer, catalog, runtime);
   }
   /** Releases the model: its GPU device, or its CPU worker and threads. A text in progress
    *  fails, and so does every later `speak`. */
   async close() {
     if (this.closed) return;
     this.closed = true;
-    await this.release();
+    await this.runtime.close();
   }
   /** The catalog's voices in the model's languages. */
   get voices() {
@@ -2142,10 +2147,10 @@ var Phonon = class _Phonon {
    *  writes them: a page can lay them out before the times arrive. */
   words(text) {
     return this.parts(text).flatMap((part) => {
-      const pieces = this.tokenizer.encode(part).map((id) => this.tokenizer.pieces[id].replaceAll("\u2581", ""));
-      return wordRanges(this.tokenizer.encode(part).map((id) => this.tokenizer.pieces[id])).map((w) => ({
+      const pieces = this.tokenizer.encode(part).map((id) => this.tokenizer.pieces[id]);
+      return wordRanges(pieces).map((w) => ({
         text: w.text,
-        tokens: pieces.slice(w.from, w.to)
+        tokens: pieces.slice(w.from, w.to).map((p) => p.replaceAll("\u2581", ""))
       }));
     });
   }

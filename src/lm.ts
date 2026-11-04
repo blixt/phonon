@@ -4,7 +4,8 @@
 // and values in. The prefill runs the text and BOS rows padded to a multiple of 64: one fixed op
 // set per size, so a text only writes its ids. A step feeds the position in the state buffer and
 // makes one frame.
-import { STATE, type Align, type Cache, type Encoder, type Graph } from "./graph";
+import { STATE, type AlignRows, type Cache, type Encoder, type Graph } from "./graph";
+import type { Align } from "./files";
 
 export const H = 512;
 const FF = 2048;
@@ -113,9 +114,9 @@ export class LanguageModel<B, O> {
   private readonly depth: number;
   /** The head that follows the text as it speaks (files.ts), its scores kept for word times. */
   private readonly alignLayer: number;
-  private readonly alignAt: Align;
+  private readonly alignAt: AlignRows;
 
-  constructor(g: Graph<B, O>, depth: number, align: { layer: number; head: number }) {
+  constructor(g: Graph<B, O>, depth: number, align: Align) {
     this.g = g;
     this.depth = depth;
     this.alignLayer = align.layer;

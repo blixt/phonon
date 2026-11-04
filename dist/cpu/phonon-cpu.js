@@ -87,6 +87,62 @@ function withoutWeights(m) {
   return { tensors: m.tensors, pace, blob: new Uint8Array() };
 }
 
+// src/files.ts
+var hubFile = (repo, revision, path) => `https://huggingface.co/${repo}/resolve/${revision}/${path}`;
+var MODEL_CACHE = "phonon-webgpu";
+var FORTY_REPO = "blixt/phonon-40m-webgpu";
+var FORTY_REVISION = "dde41aa27ed6bed7c874621d8b17e77dfece21bf";
+var fortyM = (name, revision, languages, align) => ({
+  source: { repo: `gradium/${name}`, revision },
+  weights: hubFile(FORTY_REPO, FORTY_REVISION, `${name}.int8.bin`),
+  tokenizer: hubFile(FORTY_REPO, FORTY_REVISION, `${name}.tokenizer.5.0.0.json`),
+  languages,
+  license: "CC-BY-NC-4.0",
+  align
+});
+var SOURCE_31M = { repo: "gradium/phonon-31m-en", revision: "92741c5b07d085ff840e26fea8ce43110b87852f" };
+var MODELS = {
+  "phonon-31m-en": {
+    source: SOURCE_31M,
+    weights: hubFile("blixt/phonon-31m-en-webgpu", "f4635a6dddaa6072451e0155c03c97fbe889b6ec", "phonon-31m-en.int8.bin"),
+    tokenizer: hubFile(SOURCE_31M.repo, SOURCE_31M.revision, "tokenizer.5.0.0.json"),
+    languages: ["en"],
+    license: "Apache-2.0",
+    align: { layer: 3, head: 0, lag: 3 }
+  },
+  "phonon-40m-en": fortyM("phonon-40m-en", "bc7e8ae7e543a7a3e4604753e42fbda76ddf0781", ["en"], { layer: 6, head: 0, lag: 3 }),
+  "phonon-40m-fr": fortyM("phonon-40m-fr", "d91086970206b88efd2c88ca971d0628b5968f0f", ["fr"], { layer: 4, head: 1, lag: 3 }),
+  "phonon-40m-de": fortyM("phonon-40m-de", "79cfc7b47fcfc0b666657b981eb366415023a862", ["de"], { layer: 3, head: 5, lag: 2 }),
+  "phonon-40m-es": fortyM("phonon-40m-es", "e5e052b26e31abd5918ade71d3135e69d51a66f8", ["es"], { layer: 4, head: 6, lag: 3 }),
+  "phonon-40m-pt": fortyM("phonon-40m-pt", "4cbfd742a1555d60eb5399c6d296e9f2e07389e9", ["pt"], { layer: 4, head: 2, lag: 3 }),
+  "phonon-40m-multilingual": fortyM("phonon-40m-multilingual", "1537ce46c64f42903e0d608b132ccb073dac46d2", ["en", "fr", "de", "es", "pt"], { layer: 4, head: 1, lag: 3 })
+};
+var VOICES_REPO = "gradium/phonon-voices";
+var VOICES_REVISION = "0ee17205f254b5abc43b266c8a0f215565c352f7";
+var CATALOG_URL = hubFile(VOICES_REPO, VOICES_REVISION, "voices.jsonl");
+
+// src/cache.ts
+async function open() {
+  try {
+    return await caches.open(MODEL_CACHE);
+  } catch {
+    return null;
+  }
+}
+async function lookup(key) {
+  try {
+    return await (await open())?.match(key);
+  } catch {
+    return void 0;
+  }
+}
+async function store(key, body) {
+  try {
+    await (await open())?.put(key, new Response(body));
+  } catch {
+  }
+}
+
 // src/lm.ts
 var H2 = 512;
 var FF = 2048;
@@ -347,36 +403,7 @@ var LanguageModel = class {
   }
 };
 
-// src/cpu.ts
-var TILES = [
-  { dot: true, rows: 2, cols: 4 },
-  { dot: true, rows: 4, cols: 4 },
-  { dot: true, rows: 2, cols: 8 },
-  { dot: false, rows: 8, cols: 8 },
-  { dot: false, rows: 4, cols: 16 }
-];
-var KIND = { copy: 0, clear: 1, gemv: 2, gemm: 3, layernorm: 4, rope: 5, attention: 6, attnStep: 7, alignRow: 8, embed: 9, noise: 10, finish: 11, upsample: 12, shift: 13, elu: 14 };
-var FIELDS = {
-  gemv: ["x", "xo", "w", "ws", "y", "K", "N", "act", "bias", "res", "r", "g", "go", "v", "ln", "lnw", "lnb", "eps", "mod", "so", "ho", "splits", "parts", "state"],
-  gemm: ["x", "w", "ws", "y", "M", "K", "N", "act", "bias", "res", "r", "yo", "ro", "load", "cin", "stride", "gate", "state"],
-  layernorm: ["x", "y", "rows", "w", "b", "eps", "gate", "state"],
-  rope: ["qkv", "q", "kc", "vc", "rows", "pos0", "freqs", "codec", "ring", "state", "table", "tableRows", "gate"],
-  attention: ["q", "kc", "vc", "out", "rows", "pos0", "codec", "window", "ring", "state", "gate"],
-  attnStep: ["qkv", "kc", "vc", "parts", "splits", "freqs", "align", "al", "lo", "width", "head", "state", "table", "tableRows"],
-  alignRow: ["q", "kc", "al", "lo", "head", "state"],
-  embed: ["ids", "x", "rows", "bos", "pad", "w", "ws", "bosv", "state"],
-  noise: ["z", "state"],
-  finish: ["x", "lat", "lats", "state", "ew", "eb", "nw", "nb", "eps", "threshold"],
-  upsample: ["lats", "y", "T", "w", "ws", "mean", "std", "state"],
-  elu: ["src", "dst", "count", "gate", "state"]
-};
-var ACT = { none: 0, gelu: 1, silu: 2 };
-var GATE = { none: 0, step: 1, chunk: 2, text: 3 };
-var LOAD = { linear: 0, conv: 1, convT: 2 };
-var PAGE = 65536;
-var SCRATCH_PER = 256 * 1024;
-var STACK = 256 * 1024;
-var MAX_PAGES = 16384;
+// src/simd.ts
 var RELAXED = new Uint8Array([
   0,
   97,
@@ -421,6 +448,37 @@ function simdLevel() {
   if (WebAssembly.validate(SIMD)) return "simd";
   return null;
 }
+
+// src/cpu.ts
+var TILES = [
+  { dot: true, rows: 2, cols: 4 },
+  { dot: true, rows: 4, cols: 4 },
+  { dot: true, rows: 2, cols: 8 },
+  { dot: false, rows: 8, cols: 8 },
+  { dot: false, rows: 4, cols: 16 }
+];
+var KIND = { copy: 0, clear: 1, gemv: 2, gemm: 3, layernorm: 4, rope: 5, attention: 6, attnStep: 7, alignRow: 8, embed: 9, noise: 10, finish: 11, upsample: 12, shift: 13, elu: 14 };
+var FIELDS = {
+  gemv: ["x", "xo", "w", "ws", "y", "K", "N", "act", "bias", "res", "r", "g", "go", "v", "ln", "lnw", "lnb", "eps", "mod", "so", "ho", "splits", "parts", "state"],
+  gemm: ["x", "w", "ws", "y", "M", "K", "N", "act", "bias", "res", "r", "yo", "ro", "load", "cin", "stride", "gate", "state"],
+  layernorm: ["x", "y", "rows", "w", "b", "eps", "gate", "state"],
+  rope: ["qkv", "q", "kc", "vc", "rows", "pos0", "freqs", "codec", "ring", "state", "table", "tableRows", "gate"],
+  attention: ["q", "kc", "vc", "out", "rows", "pos0", "codec", "window", "ring", "state", "gate"],
+  attnStep: ["qkv", "kc", "vc", "parts", "splits", "freqs", "align", "al", "lo", "width", "head", "state", "table", "tableRows"],
+  alignRow: ["q", "kc", "al", "lo", "head", "state"],
+  embed: ["ids", "x", "rows", "bos", "pad", "w", "ws", "bosv", "state"],
+  noise: ["z", "state"],
+  finish: ["x", "lat", "lats", "state", "ew", "eb", "nw", "nb", "eps", "threshold"],
+  upsample: ["lats", "y", "T", "w", "ws", "mean", "std", "state"],
+  elu: ["src", "dst", "count", "gate", "state"]
+};
+var ACT = { none: 0, gelu: 1, silu: 2 };
+var GATE = { none: 0, step: 1, chunk: 2, text: 3 };
+var LOAD = { linear: 0, conv: 1, convT: 2 };
+var PAGE = 65536;
+var SCRATCH_PER = 256 * 1024;
+var STACK = 256 * 1024;
+var MAX_PAGES = 16384;
 function unshare(bytes) {
   let at = 8;
   const leb = () => {
@@ -480,7 +538,6 @@ async function instantiate(wasm, shared, bytes) {
   return { module, memory, exports: { ...instance.exports, memory } };
 }
 var f32bits = (v) => new Uint32Array(new Float32Array([v]).buffer)[0];
-var PROFILE = typeof __PROFILE__ !== "undefined" && __PROFILE__;
 var Staging = class {
   bytes;
   constructor(bytes) {
@@ -624,7 +681,7 @@ var CpuGraph = class {
   /** Runs ops now, in one call. */
   exec(ops) {
     if (!ops.length) return;
-    if (PROFILE) {
+    if (false) {
       for (const op of ops) {
         new Uint32Array(this.x.memory.buffer, this.list.ptr, 1)[0] = op;
         const t = performance.now();
@@ -656,7 +713,7 @@ var CpuGraph = class {
     const words = [KIND[kind], ...fields.map((f) => given[f] ?? 0), ...extra];
     const b = this.buffer(words.length * 4);
     new Uint32Array(this.x.memory.buffer, b.ptr, words.length).set(words.map((v) => v >>> 0));
-    if (PROFILE) this.labels.set(b.ptr, kind === "gemv" || kind === "gemm" ? this.label : kind);
+    if (false) this.labels.set(b.ptr, kind === "gemv" || kind === "gemm" ? this.label : kind);
     return b.ptr;
   }
   /** The name the next ops are timed under, in a profile build. */
@@ -707,7 +764,7 @@ var CpuGraph = class {
     const { ln, combine } = o;
     const res = o.res ?? "none";
     const w = this.q8(wname);
-    if (PROFILE) this.label = `gemv ${wname.replace(/\d+/g, "")}`;
+    if (false) this.label = `gemv ${wname.replace(/\d+/g, "")}`;
     return this.desc("gemv", {
       x: x?.ptr,
       xo: o.xo,
@@ -754,7 +811,7 @@ var CpuGraph = class {
       ops.push(op2);
       src = this.elu.ptr;
     }
-    if (PROFILE) this.label = `${wname.replace(/\d+/g, "")} M${o.M}`;
+    if (false) this.label = `${wname.replace(/\d+/g, "")} M${o.M}`;
     const op = this.desc("gemm", {
       x: src,
       ...this.t(wname),
@@ -879,39 +936,6 @@ var CpuGraph = class {
     return b.ptr;
   }
 };
-
-// src/files.ts
-var hubFile = (repo, revision, path) => `https://huggingface.co/${repo}/resolve/${revision}/${path}`;
-var MODEL_CACHE = "phonon-webgpu";
-var FORTY_REPO = "blixt/phonon-40m-webgpu";
-var FORTY_REVISION = "dde41aa27ed6bed7c874621d8b17e77dfece21bf";
-var fortyM = (name, revision, languages, align) => ({
-  source: { repo: `gradium/${name}`, revision },
-  weights: hubFile(FORTY_REPO, FORTY_REVISION, `${name}.int8.bin`),
-  tokenizer: hubFile(FORTY_REPO, FORTY_REVISION, `${name}.tokenizer.5.0.0.json`),
-  languages,
-  license: "CC-BY-NC-4.0",
-  align
-});
-var MODELS = {
-  "phonon-31m-en": {
-    source: { repo: "gradium/phonon-31m-en", revision: "92741c5b07d085ff840e26fea8ce43110b87852f" },
-    weights: hubFile("blixt/phonon-31m-en-webgpu", "f4635a6dddaa6072451e0155c03c97fbe889b6ec", "phonon-31m-en.int8.bin"),
-    tokenizer: "tokenizer.5.0.0.json",
-    languages: ["en"],
-    license: "Apache-2.0",
-    align: { layer: 3, head: 0, lag: 3 }
-  },
-  "phonon-40m-en": fortyM("phonon-40m-en", "bc7e8ae7e543a7a3e4604753e42fbda76ddf0781", ["en"], { layer: 6, head: 0, lag: 3 }),
-  "phonon-40m-fr": fortyM("phonon-40m-fr", "d91086970206b88efd2c88ca971d0628b5968f0f", ["fr"], { layer: 4, head: 1, lag: 3 }),
-  "phonon-40m-de": fortyM("phonon-40m-de", "79cfc7b47fcfc0b666657b981eb366415023a862", ["de"], { layer: 3, head: 5, lag: 2 }),
-  "phonon-40m-es": fortyM("phonon-40m-es", "e5e052b26e31abd5918ade71d3135e69d51a66f8", ["es"], { layer: 4, head: 6, lag: 3 }),
-  "phonon-40m-pt": fortyM("phonon-40m-pt", "4cbfd742a1555d60eb5399c6d296e9f2e07389e9", ["pt"], { layer: 4, head: 2, lag: 3 }),
-  "phonon-40m-multilingual": fortyM("phonon-40m-multilingual", "1537ce46c64f42903e0d608b132ccb073dac46d2", ["en", "fr", "de", "es", "pt"], { layer: 4, head: 1, lag: 3 })
-};
-var VOICES_REPO = "gradium/phonon-voices";
-var VOICES_REVISION = "0ee17205f254b5abc43b266c8a0f215565c352f7";
-var CATALOG_URL = hubFile(VOICES_REPO, VOICES_REVISION, "voices.jsonl");
 
 // src/codec.ts
 var CHUNKS = [1, 2, 4, 8];
@@ -1205,21 +1229,10 @@ async function startPool(pool, url, n, stacks) {
   return 1 + count;
 }
 async function tile(g, key) {
-  let cache = null;
-  try {
-    cache = await caches.open(MODEL_CACHE);
-    const hit = await cache.match(key);
-    if (hit) {
-      const known = await hit.json();
-      if (TILES.some((t) => JSON.stringify(t) === JSON.stringify(known))) return known;
-    }
-  } catch {
-  }
+  const known = await (await lookup(key))?.json().catch(() => null);
+  if (known && TILES.some((t) => JSON.stringify(t) === JSON.stringify(known))) return known;
   const best = g.fastestTile();
-  try {
-    await cache?.put(key, new Response(JSON.stringify(best)));
-  } catch {
-  }
+  await store(key, JSON.stringify(best));
   return best;
 }
 var engine = null;
@@ -1282,7 +1295,7 @@ scope.onmessage = async (e) => {
         onRows: (rows) => scope.postMessage({ type: "rows", id, rows }, [rows.buffer]),
         onChunk: (samples) => scope.postMessage({ type: "chunk", id, samples }, [samples.buffer])
       });
-      if (graph?.times.size) {
+      if (false) {
         console.log(JSON.stringify([...graph.times].sort((a, b) => b[1] - a[1]).map(([k, v]) => [k, +v.toFixed(2)])));
         graph.times.clear();
       }

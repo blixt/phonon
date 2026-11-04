@@ -1,13 +1,14 @@
 import { type Language, type ModelId } from "./files";
 import { type Span, type Word } from "./timing";
-/** Where a model runs. */
-export interface Backend {
-    name: "webgpu" | "cpu";
-    /** On the CPU: threads that share each op's work, and the WebAssembly build ("relaxed" for
-     *  relaxed SIMD, else "simd"). */
-    threads?: number;
-    simd?: string;
-}
+/** Where a model runs: WebGPU, or the CPU with its threads (each op's work shared among them) and
+ *  its WebAssembly build ("relaxed" for relaxed SIMD). */
+export type Backend = {
+    name: "webgpu";
+} | {
+    name: "cpu";
+    threads: number;
+    simd: "relaxed" | "simd";
+};
 export interface LoadOptions {
     /** files.ts MODELS: Phonon 31M by default. */
     model?: ModelId;
@@ -52,17 +53,18 @@ export interface SpeakOptions {
 }
 /** The model, ready to speak. */
 export declare class Phonon {
+    private readonly runtime;
     private readonly engine;
     private readonly tokenizer;
     private readonly catalog;
+    /** Frames the alignment head reads ahead of the audio (files.ts). */
+    private readonly lag;
+    private closed;
     /** Settles when the GPU device is lost (a reset), or the CPU's worker stops: load again to go on. */
     readonly lost: Promise<unknown>;
     readonly backend: Backend;
-    private readonly release;
-    private closed;
     /** The voice `speak` uses when none is given: the default of the model's first language. */
     readonly defaultVoice: string;
-    private readonly lag;
     private constructor();
     /** Loads a model: a download the first time, then the browser's cache. It runs on WebGPU
      *  when the browser has an adapter, else on the CPU, in a worker. */

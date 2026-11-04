@@ -1,5 +1,6 @@
 import { type PhononModel } from "./checkpoint";
 import { type Graph } from "./graph";
+import type { Align } from "./files";
 import { TEXT_MAX } from "./lm";
 export { TEXT_MAX };
 export declare class PhononEngine<B, O> implements Engine {
@@ -15,10 +16,7 @@ export declare class PhononEngine<B, O> implements Engine {
     /** Settles when the text in progress has drained. */
     private turn;
     /** `g` holds the model's weights. */
-    constructor(g: Graph<B, O>, model: PhononModel, align: {
-        layer: number;
-        head: number;
-    });
+    constructor(g: Graph<B, O>, model: PhononModel, align: Align);
     /** Settles when every shader has compiled. */
     ready(): Promise<void>;
     /** Registers a voice by its speaker latents, [125][512]. Its prefill uses the LM's caches, so

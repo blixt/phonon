@@ -347,14 +347,14 @@ export class GpuGraph implements G.Graph<GPUBuffer, Op> {
     kc: GPUBuffer,
     vc: GPUBuffer,
     parts: GPUBuffer,
-    o: { splits: number; theta: string; align?: { at: G.Align; buf: GPUBuffer } },
+    o: { splits: number; theta: string; align?: { at: G.AlignRows; buf: GPUBuffer } },
   ): Op {
     const code = K.attnSplit({ splits: o.splits, theta: o.theta, sg: this.sg, align: o.align?.at });
     const bindings = [qkv, kc, vc, parts, this.state];
     return this.op(code, o.align ? [...bindings, o.align.buf] : bindings, [o.splits, 8, 1]);
   }
 
-  alignRow(q: GPUBuffer, kc: GPUBuffer, al: GPUBuffer, at: G.Align): Op {
+  alignRow(q: GPUBuffer, kc: GPUBuffer, al: GPUBuffer, at: G.AlignRows): Op {
     return this.op(K.alignRow(at), [q, kc, al, this.state], [1, 1, 1]);
   }
 

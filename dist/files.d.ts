@@ -16,6 +16,7 @@ export interface ModelFiles {
     };
     /** The engine's weights, converted from the source (checkpoint.ts). */
     weights: string;
+    /** Its tokenizer.5.0.0.json. */
     tokenizer: string;
     languages: Language[];
     license: string;
@@ -47,8 +48,6 @@ export declare const MODELS: {
     "phonon-40m-multilingual": ModelFiles;
 };
 export type ModelId = keyof typeof MODELS;
-/** The tokenizer's URL: in the source repository, or a copy beside the weights. */
-export declare const tokenizerUrl: (m: ModelFiles) => string;
 /** The voice catalog: one JSON line per voice. */
 export declare const CATALOG_URL: string;
 export declare const voiceUrl: (id: string) => string;

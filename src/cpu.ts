@@ -6,6 +6,7 @@
 import type { Tensor } from "./checkpoint";
 import type * as G from "./graph";
 import { S_MAX } from "./lm";
+export { simdLevel } from "./simd";
 
 /** A GEMM tile (dot products of rows x 4 or 2 x 8 columns, or broadcasts of rows x 8 or 16)
  *  and the GEMV's arithmetic. */
@@ -69,18 +70,6 @@ export const STACK = 256 * 1024;
 
 /** The memory's largest size, in pages: the module allows 1 GiB. */
 const MAX_PAGES = 16384;
-
-/** Modules that validate only with relaxed SIMD (i8x16.relaxed_swizzle), or with SIMD128. */
-const RELAXED = new Uint8Array([
-  0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 15, 1, 13, 0, 65, 0, 253, 15, 65, 0, 253, 15, 253,
-  128, 2, 11,
-]);
-const SIMD = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11]);
-export function simdLevel(): "relaxed" | "simd" | null {
-  if (WebAssembly.validate(RELAXED)) return "relaxed";
-  if (WebAssembly.validate(SIMD)) return "simd";
-  return null;
-}
 
 /** The module with its memory import made unshared, for a page that is not cross-origin
  *  isolated: one flag byte in the import section. */
@@ -148,9 +137,11 @@ export async function instantiate(wasm: Uint8Array<ArrayBuffer>, shared: boolean
 }
 
 const f32bits = (v: number) => new Uint32Array(new Float32Array([v]).buffer)[0];
-declare const __PROFILE__: boolean;
-/** A build with --define:__PROFILE__=true times each op by its label, and logs the totals. */
-const PROFILE = typeof __PROFILE__ !== "undefined" && __PROFILE__;
+/** Every build defines it: true times each op by its label and logs the totals, false (the
+ *  shipped builds) compiles that out. */
+declare global {
+  const __PROFILE__: boolean;
+}
 
 class Staging implements G.Staging {
   readonly bytes: ArrayBuffer;
@@ -303,7 +294,7 @@ export class CpuGraph implements G.Graph<CpuBuf, CpuOp> {
   /** Runs ops now, in one call. */
   exec(ops: CpuOp[]) {
     if (!ops.length) return;
-    if (PROFILE) {
+    if (__PROFILE__) {
       for (const op of ops) {
         new Uint32Array(this.x.memory.buffer, this.list.ptr, 1)[0] = op;
         const t = performance.now();
@@ -336,7 +327,7 @@ export class CpuGraph implements G.Graph<CpuBuf, CpuOp> {
     const words = [KIND[kind], ...fields.map((f) => given[f] ?? 0), ...extra];
     const b = this.buffer(words.length * 4);
     new Uint32Array(this.x.memory.buffer, b.ptr, words.length).set(words.map((v) => v >>> 0));
-    if (PROFILE) this.labels.set(b.ptr, kind === "gemv" || kind === "gemm" ? this.label : kind);
+    if (__PROFILE__) this.labels.set(b.ptr, kind === "gemv" || kind === "gemm" ? this.label : kind);
     return b.ptr;
   }
   /** The name the next ops are timed under, in a profile build. */
@@ -388,7 +379,7 @@ export class CpuGraph implements G.Graph<CpuBuf, CpuOp> {
     const { ln, combine } = o;
     const res = o.res ?? "none";
     const w = this.q8(wname);
-    if (PROFILE) this.label = `gemv ${wname.replace(/\d+/g, "")}`;
+    if (__PROFILE__) this.label = `gemv ${wname.replace(/\d+/g, "")}`;
     return this.desc("gemv", {
       x: x?.ptr,
       xo: o.xo,
@@ -437,7 +428,7 @@ export class CpuGraph implements G.Graph<CpuBuf, CpuOp> {
       ops.push(op);
       src = this.elu.ptr;
     }
-    if (PROFILE) this.label = `${wname.replace(/\d+/g, "")} M${o.M}`;
+    if (__PROFILE__) this.label = `${wname.replace(/\d+/g, "")} M${o.M}`;
     const op = this.desc("gemm", {
       x: src,
       ...this.t(wname),
@@ -514,7 +505,7 @@ export class CpuGraph implements G.Graph<CpuBuf, CpuOp> {
     kc: CpuBuf,
     vc: CpuBuf,
     parts: CpuBuf,
-    o: { splits: number; theta: string; align?: { at: G.Align; buf: CpuBuf } },
+    o: { splits: number; theta: string; align?: { at: G.AlignRows; buf: CpuBuf } },
   ): CpuOp {
     return this.desc("attnStep", {
       qkv: qkv.ptr,
@@ -532,7 +523,7 @@ export class CpuGraph implements G.Graph<CpuBuf, CpuOp> {
     });
   }
 
-  alignRow(q: CpuBuf, kc: CpuBuf, al: CpuBuf, at: G.Align): CpuOp {
+  alignRow(q: CpuBuf, kc: CpuBuf, al: CpuBuf, at: G.AlignRows): CpuOp {
     return this.desc("alignRow", { q: q.ptr, kc: kc.ptr, al: al.ptr, lo: at.lo, head: at.head, state: this.state.ptr });
   }
 

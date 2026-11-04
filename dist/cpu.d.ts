@@ -1,5 +1,6 @@
 import type { Tensor } from "./checkpoint";
 import type * as G from "./graph";
+export { simdLevel } from "./simd";
 /** A GEMM tile (dot products of rows x 4 or 2 x 8 columns, or broadcasts of rows x 8 or 16)
  *  and the GEMV's arithmetic. */
 export interface Variant {
@@ -29,7 +30,6 @@ export interface CpuExports {
 }
 /** Each pool thread's stack. */
 export declare const STACK: number;
-export declare function simdLevel(): "relaxed" | "simd" | null;
 /** The module with its memory import made unshared, for a page that is not cross-origin
  *  isolated: one flag byte in the import section. */
 export declare function unshare(bytes: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer>;
@@ -50,6 +50,11 @@ export declare function instantiate(wasm: Uint8Array<ArrayBuffer>, shared: boole
         memory: WebAssembly.Memory;
     };
 }>;
+/** Every build defines it: true times each op by its label and logs the totals, false (the
+ *  shipped builds) compiles that out. */
+declare global {
+    const __PROFILE__: boolean;
+}
 declare class Staging implements G.Staging {
     readonly bytes: ArrayBuffer;
     constructor(bytes: number);
@@ -141,11 +146,11 @@ export declare class CpuGraph implements G.Graph<CpuBuf, CpuOp> {
         splits: number;
         theta: string;
         align?: {
-            at: G.Align;
+            at: G.AlignRows;
             buf: CpuBuf;
         };
     }): CpuOp;
-    alignRow(q: CpuBuf, kc: CpuBuf, al: CpuBuf, at: G.Align): CpuOp;
+    alignRow(q: CpuBuf, kc: CpuBuf, al: CpuBuf, at: G.AlignRows): CpuOp;
     embedRows(ids: CpuBuf, x: CpuBuf, rows: number, o: {
         bos: number;
         pad: number;
@@ -158,4 +163,3 @@ export declare class CpuGraph implements G.Graph<CpuBuf, CpuOp> {
     upsample(lats: CpuBuf, y: CpuBuf, T: number): CpuOp;
     shiftRows(stages: G.Stage<CpuBuf>[], T: number): CpuOp;
 }
-export {};

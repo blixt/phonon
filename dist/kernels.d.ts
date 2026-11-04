@@ -1,4 +1,4 @@
-import { STATE, type Act, type Align, type Cache, type ConvShape, type Gate, type Residual } from "./graph";
+import { STATE, type Act, type AlignRows, type Cache, type ConvShape, type Gate, type Residual } from "./graph";
 export { STATE };
 /** Each kernel's uniform fields, in order: its WGSL struct and the values gpu.ts writes. */
 export declare const UNIFORMS: {
@@ -125,8 +125,8 @@ export declare function attnSplit({ splits, theta, sg, align, }: {
     theta: string;
     sg: boolean;
     /** Keep the alignment head's scores over the text, for word times. */
-    align?: Align;
+    align?: AlignRows;
 }): string;
 /** Frame 0's alignment row, in the prefill after the alignment layer's attention: the alignment
  *  head's scores of the BOS row (the last text row, at the state's position) over the text. */
-export declare function alignRow({ lo, head }: Align): string;
+export declare function alignRow({ lo, head }: AlignRows): string;

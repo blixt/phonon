@@ -8,6 +8,7 @@
 import { paceVectors } from "./pace";
 import { lmLayers, toF16, type PhononModel } from "./checkpoint";
 import { STATE, type Graph, type Staging } from "./graph";
+import type { Align } from "./files";
 import { F_MAX, H, LanguageModel, PROMPT, S_MAX, TEXT_MAX } from "./lm";
 import { CHUNKS, Codec, FRAME } from "./codec";
 
@@ -38,7 +39,7 @@ export class PhononEngine<B, O> implements Engine {
   private turn: Promise<void> = Promise.resolve();
 
   /** `g` holds the model's weights. */
-  constructor(g: Graph<B, O>, model: PhononModel, align: { layer: number; head: number }) {
+  constructor(g: Graph<B, O>, model: PhononModel, align: Align) {
     this.model = model;
     this.g = g;
     this.lm = new LanguageModel(this.g, lmLayers(model), align);

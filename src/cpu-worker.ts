@@ -3,8 +3,8 @@
 // asks (remote.ts). With shared memory it also starts pool workers, more copies of this file,
 // each a thread that takes part of every op.
 import { unpackModel, withoutWeights } from "./checkpoint";
+import { lookup, store } from "./cache";
 import { CpuGraph, instantiate, simdLevel, STACK, TILES, type CpuExports, type Variant } from "./cpu";
-import { MODEL_CACHE } from "./files";
 import { PhononEngine } from "./engine";
 import type { ToWorker } from "./remote";
 
@@ -50,23 +50,10 @@ async function startPool(pool: Pool, url: string, n: number, stacks: number): Pr
 /** The fastest GEMM tile on this device, timed on first use and kept in the cache when there is
  *  one (an insecure page has none). */
 async function tile(g: CpuGraph, key: string): Promise<Variant["tile"]> {
-  let cache: Cache | null = null;
-  try {
-    cache = await caches.open(MODEL_CACHE);
-    const hit = await cache.match(key);
-    if (hit) {
-      const known = (await hit.json()) as Variant["tile"];
-      if (TILES.some((t) => JSON.stringify(t) === JSON.stringify(known))) return known;
-    }
-  } catch {
-    /* Time them. */
-  }
+  const known = (await (await lookup(key))?.json().catch(() => null)) as Variant["tile"] | null;
+  if (known && TILES.some((t) => JSON.stringify(t) === JSON.stringify(known))) return known;
   const best = g.fastestTile();
-  try {
-    await cache?.put(key, new Response(JSON.stringify(best)));
-  } catch {
-    /* Time them again next time. */
-  }
+  await store(key, JSON.stringify(best));
   return best;
 }
 
@@ -135,7 +122,7 @@ scope.onmessage = async (e: MessageEvent) => {
         onRows: (rows) => scope.postMessage({ type: "rows", id, rows }, [rows.buffer as ArrayBuffer]),
         onChunk: (samples) => scope.postMessage({ type: "chunk", id, samples }, [samples.buffer as ArrayBuffer]),
       });
-      if (graph?.times.size) {
+      if (__PROFILE__ && graph?.times.size) {
         console.log(JSON.stringify([...graph.times].sort((a, b) => b[1] - a[1]).map(([k, v]) => [k, +v.toFixed(2)])));
         graph.times.clear();
       }

@@ -64,6 +64,7 @@ var CpuEngine = class _CpuEngine {
     return this.voices.has(name);
   }
   synthesize(ids, voice, options = {}) {
+    if (this.dead) return Promise.reject(this.dead);
     const id = this.next++;
     const { seed, pace, words, latents } = options;
     const m = { type: "speak", id, ids, voice, options: { seed, pace, words } };
@@ -71,7 +72,6 @@ var CpuEngine = class _CpuEngine {
       m.latents = latents.slice();
       this.voices.add(voice);
     }
-    if (this.dead) return Promise.reject(this.dead);
     return new Promise((done, fail) => {
       this.jobs.set(id, { options, chunks: [], done, fail, cancelSent: false });
       this.worker.postMessage(m, m.latents ? [m.latents.buffer] : []);

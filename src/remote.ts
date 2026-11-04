@@ -2,9 +2,10 @@
 // (cpu-worker.ts), so speech never blocks the page. The worker's code and module load only when
 // a page uses the CPU.
 import type { Engine, Synthesis, SynthesizeOptions } from "./engine";
+import type { Align } from "./files";
 
 export type ToWorker =
-  | { type: "load"; packed: ArrayBuffer; align: { layer: number; head: number }; threads: number }
+  | { type: "load"; packed: ArrayBuffer; align: Align; threads: number }
   | {
       type: "speak";
       id: number;
@@ -17,7 +18,7 @@ export type ToWorker =
   | { type: "close" };
 
 type FromWorker =
-  | { type: "loaded"; threads: number; simd: string; memory: number }
+  | { type: "loaded"; threads: number; simd: "relaxed" | "simd"; memory: number }
   | { type: "closed" }
   | { type: "rows"; id: number; rows: Float32Array }
   | { type: "chunk"; id: number; samples: Float32Array }
@@ -36,13 +37,13 @@ export class CpuEngine implements Engine {
   /** Threads that take part in each op, this worker's included. */
   readonly threads: number;
   /** The WebAssembly build: "relaxed" (relaxed SIMD) or "simd". */
-  readonly simd: string;
+  readonly simd: "relaxed" | "simd";
   private readonly worker: Worker;
   private readonly voices = new Set<string>();
   private readonly jobs = new Map<number, Job>();
   private next = 1;
 
-  private constructor(worker: Worker, info: { threads: number; simd: string }) {
+  private constructor(worker: Worker, info: { threads: number; simd: "relaxed" | "simd" }) {
     this.worker = worker;
     this.threads = info.threads;
     this.simd = info.simd;
@@ -62,9 +63,9 @@ export class CpuEngine implements Engine {
   readonly lost: Promise<Error>;
 
   /** Starts the worker with a model's packed weights (moved to it, not copied). */
-  static async start(packed: ArrayBuffer, align: { layer: number; head: number }, threads: number): Promise<CpuEngine> {
+  static async start(packed: ArrayBuffer, align: Align, threads: number): Promise<CpuEngine> {
     const worker = new Worker(new URL("./phonon-cpu.js", import.meta.url), { type: "module" });
-    const info = await new Promise<{ threads: number; simd: string }>((resolve, reject) => {
+    const info = await new Promise<{ threads: number; simd: "relaxed" | "simd" }>((resolve, reject) => {
       worker.onmessage = (e: MessageEvent<FromWorker>) => {
         if (e.data.type === "loaded") resolve(e.data);
         else if (e.data.type === "error") reject(new Error(e.data.message));
@@ -104,6 +105,7 @@ export class CpuEngine implements Engine {
   }
 
   synthesize(ids: number[], voice: string, options: SynthesizeOptions = {}): Promise<Synthesis | null> {
+    if (this.dead) return Promise.reject(this.dead);
     const id = this.next++;
     const { seed, pace, words, latents } = options;
     const m: ToWorker = { type: "speak", id, ids, voice, options: { seed, pace, words } };
@@ -111,7 +113,6 @@ export class CpuEngine implements Engine {
       m.latents = latents.slice();
       this.voices.add(voice);
     }
-    if (this.dead) return Promise.reject(this.dead);
     return new Promise((done, fail) => {
       this.jobs.set(id, { options, chunks: [], done, fail, cancelSent: false });
       this.worker.postMessage(m, m.latents ? [m.latents.buffer] : []);

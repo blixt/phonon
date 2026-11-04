@@ -20,6 +20,7 @@ export interface ModelFiles {
   source: { repo: string; revision: string };
   /** The engine's weights, converted from the source (checkpoint.ts). */
   weights: string;
+  /** Its tokenizer.5.0.0.json. */
   tokenizer: string;
   languages: Language[];
   license: string;
@@ -40,11 +41,13 @@ const fortyM = (name: string, revision: string, languages: Language[], align: Al
   align,
 });
 
+const SOURCE_31M = { repo: "gradium/phonon-31m-en", revision: "92741c5b07d085ff840e26fea8ce43110b87852f" };
+
 export const MODELS = {
   "phonon-31m-en": {
-    source: { repo: "gradium/phonon-31m-en", revision: "92741c5b07d085ff840e26fea8ce43110b87852f" },
+    source: SOURCE_31M,
     weights: hubFile("blixt/phonon-31m-en-webgpu", "f4635a6dddaa6072451e0155c03c97fbe889b6ec", "phonon-31m-en.int8.bin"),
-    tokenizer: "tokenizer.5.0.0.json",
+    tokenizer: hubFile(SOURCE_31M.repo, SOURCE_31M.revision, "tokenizer.5.0.0.json"),
     languages: ["en"],
     license: "Apache-2.0",
     align: { layer: 3, head: 0, lag: 3 },
@@ -57,10 +60,6 @@ export const MODELS = {
   "phonon-40m-multilingual": fortyM("phonon-40m-multilingual", "1537ce46c64f42903e0d608b132ccb073dac46d2", ["en", "fr", "de", "es", "pt"], { layer: 4, head: 1, lag: 3 }),
 } satisfies Record<string, ModelFiles>;
 export type ModelId = keyof typeof MODELS;
-
-/** The tokenizer's URL: in the source repository, or a copy beside the weights. */
-export const tokenizerUrl = (m: ModelFiles) =>
-  m.tokenizer.startsWith("https:") ? m.tokenizer : hubFile(m.source.repo, m.source.revision, m.tokenizer);
 
 const VOICES_REPO = "gradium/phonon-voices";
 const VOICES_REVISION = "0ee17205f254b5abc43b266c8a0f215565c352f7";

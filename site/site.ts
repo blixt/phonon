@@ -1,7 +1,9 @@
 // The web page's script: it draws the charts into the boxes the build wrote (frames.ts), and
 // runs the demo with its live numbers. Nothing here changes a box's size.
 import { Phonon, type Speech, type Voice, type Word } from "../src/index";
-import { MODEL_CACHE, MODELS, type Language, type ModelId } from "../src/files";
+import { lookup } from "../src/cache";
+import { MODELS, type Language, type ModelId } from "../src/files";
+import { simdLevel } from "../src/simd";
 import { DEVICES, METRICS, PHRASES, QUALITY, RESULTS, RUNTIMES, TEXTS, TIMING, fmt, ms, short, type Metric, type Stat, downloadMb } from "./data";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -454,31 +456,31 @@ async function demo(redrawBars: () => void) {
     box.replaceChildren(Object.assign(document.createElement("span"), { className: "why", textContent: why }));
     box.classList.add("on");
   };
-  let lastError: string | null = null;
-  const copy = $<HTMLButtonElement>("copy-details");
-  copy.onclick = async () => {
-    const ok = await navigator.clipboard.writeText(details(adapter ?? null, backendName, id(), lastError)).then(() => true, () => false);
-    copy.textContent = ok ? "Copied" : "Copy failed";
-    setTimeout(() => (copy.textContent = "Copy details"), 2000);
-  };
-  // Without WebGPU the demo speaks on the CPU, with threads once the page is cross-origin
-  // isolated (isolate).
-  if (await isolate(!!adapter)) return;
-  const simd = WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11]));
-  if (!adapter && !simd) {
-    button.disabled = true;
-    set("s-load", "–", "cannot run here");
-    note("No WebGPU or WebAssembly SIMD");
-    explain("This browser has neither WebGPU nor WebAssembly SIMD, and the demo needs one of them.");
-    return;
-  }
-  let backendName = adapter ? "webgpu" : "cpu";
   const info = adapter?.info;
   const gpuName = info
     ? `GPU: ${[info.vendor, info.architecture].filter(Boolean).join(" ") || "unknown"}`
     : gpu
       ? "CPU: this browser gave no GPU"
       : "CPU: this browser has no WebGPU";
+  /** The CPU's threads and build, once a model has loaded there. */
+  let cpuName: string | null = null;
+  let lastError: string | null = null;
+  const copy = $<HTMLButtonElement>("copy-details");
+  copy.onclick = async () => {
+    const ok = await navigator.clipboard.writeText(details(adapter ?? null, cpuName ?? gpuName, id(), lastError)).then(() => true, () => false);
+    copy.textContent = ok ? "Copied" : "Copy failed";
+    setTimeout(() => (copy.textContent = "Copy details"), 2000);
+  };
+  // Without WebGPU the demo speaks on the CPU, with threads once the page is cross-origin
+  // isolated (isolate).
+  if (await isolate(!!adapter)) return;
+  if (!adapter && !simdLevel()) {
+    button.disabled = true;
+    set("s-load", "–", "cannot run here");
+    note("No WebGPU or WebAssembly SIMD");
+    explain("This browser has neither WebGPU nor WebAssembly SIMD, and the demo needs one of them.");
+    return;
+  }
   const text = $<HTMLTextAreaElement>("text");
   /** Stops what is speaking (set once the player below exists). */
   let stopAll = () => {};
@@ -486,12 +488,10 @@ async function demo(redrawBars: () => void) {
   /** Each model once loaded (or loading), and the one the controls speak with. */
   const loads = new Map<ModelId, Promise<Phonon>>();
   let tts: Phonon | null = null;
-  /** The CPU's threads and build, once a model has loaded there. */
-  let cpuName: string | null = null;
   const language = () => tts?.voices.find((v) => v.name === voice.value)?.language ?? "en";
-  /** Shows the chosen model's state: its download before it loads, then its load time. */
   /** Each loaded model's first audio after its load, and whether the load downloaded it. */
   const started = new Map<ModelId, { ms: number; downloaded: boolean }>();
+  /** Shows the chosen model's state: its download before it loads, then its load time. */
   const describe = () => {
     const m = MODELS[id()];
     const where = cpuName ?? gpuName;
@@ -541,10 +541,8 @@ async function demo(redrawBars: () => void) {
         },
       });
       const loaded = performance.now() - t0;
-      if (p.backend.name === "cpu") {
-        backendName = `cpu, ${p.backend.threads} threads, ${p.backend.simd}`;
+      if (p.backend.name === "cpu")
         cpuName = `CPU: ${p.backend.threads} ${p.backend.threads === 1 ? "thread" : "threads"}, ${p.backend.simd === "relaxed" ? "relaxed SIMD" : "SIMD"}`;
-      }
       if (which !== id()) return p;
       tts = p;
       showVoices(p);
@@ -588,8 +586,7 @@ async function demo(redrawBars: () => void) {
     }
   };
   // With the model in the cache, loading costs no download: start at once.
-  const cache = await caches.open(MODEL_CACHE).catch(() => null);
-  if (await cache?.match(MODELS[id()].weights)) void load().catch(() => {});
+  if (await lookup(MODELS[id()].weights)) void load().catch(() => {});
 
   let ctx: AudioContext | null = null;
   let sources: AudioBufferSourceNode[] = [];
