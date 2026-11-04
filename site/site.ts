@@ -335,8 +335,8 @@ function listenPlayers(box: HTMLElement) {
 
 // ---- The demo. ----
 
-/** What a bug report needs: the page, the browser, the GPU and its limits, the model and the last error. */
-function details(adapter: GPUAdapter | null, model: string, error: string | null): string {
+/** What a bug report needs: the page, the browser, the GPU and its limits, the backend, the model and the last error. */
+function details(adapter: GPUAdapter | null, backend: string, model: string, error: string | null): string {
   const info = adapter?.info as (GPUAdapterInfo & { subgroupMinSize?: number; subgroupMaxSize?: number }) | undefined;
   const limits = adapter
     ? (["maxBufferSize", "maxStorageBufferBindingSize", "maxStorageBuffersPerShaderStage", "maxComputeWorkgroupStorageSize", "maxComputeInvocationsPerWorkgroup"] as const)
@@ -353,6 +353,8 @@ function details(adapter: GPUAdapter | null, model: string, error: string | null
     `subgroups: ${adapter?.features.has("subgroups") ? `${info?.subgroupMinSize}-${info?.subgroupMaxSize}` : "no"}`,
     `features: ${adapter ? [...adapter.features].sort().join(", ") : "–"}`,
     `limits: ${limits}`,
+    `cross-origin isolated: ${crossOriginIsolated ? "yes" : "no"}, cores: ${navigator.hardwareConcurrency ?? "unknown"}`,
+    `backend: ${backend}`,
     `model: ${model}`,
     `stats: ${["s-load", "s-first", "s-speed", "s-audio"].map(stat).join(" | ")}`,
     `error: ${error ?? "none"}`,
@@ -382,6 +384,21 @@ function voiceOptions(voices: readonly Voice[], languages: readonly Language[]):
   });
 }
 
+/** Registers coi.js and reloads under it, once per tab: answers false when it cannot. */
+async function isolate(): Promise<boolean> {
+  const sw = navigator.serviceWorker;
+  if (!sw || !isSecureContext || sessionStorage.getItem("phonon-isolate")) return false;
+  sessionStorage.setItem("phonon-isolate", "1");
+  try {
+    await sw.register("coi.js");
+    await sw.ready;
+  } catch {
+    return false;
+  }
+  location.reload();
+  return true;
+}
+
 async function demo(redrawBars: () => void) {
   const button = $<HTMLButtonElement>("speak");
 
@@ -409,25 +426,28 @@ async function demo(redrawBars: () => void) {
   let lastError: string | null = null;
   const copy = $<HTMLButtonElement>("copy-details");
   copy.onclick = async () => {
-    const ok = await navigator.clipboard.writeText(details(adapter ?? null, id(), lastError)).then(() => true, () => false);
+    const ok = await navigator.clipboard.writeText(details(adapter ?? null, backendName, id(), lastError)).then(() => true, () => false);
     copy.textContent = ok ? "Copied" : "Copy failed";
     setTimeout(() => (copy.textContent = "Copy details"), 2000);
   };
-  if (!adapter) {
+  // Without WebGPU the demo speaks on the CPU, with threads once the page is cross-origin
+  // isolated: a service worker (coi.js) adds the headers, after one reload.
+  if (!adapter && !crossOriginIsolated && (navigator.hardwareConcurrency ?? 1) > 1 && (await isolate())) return;
+  const simd = WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11]));
+  if (!adapter && !simd) {
     button.disabled = true;
-    set("s-load", "–", "no WebGPU here");
-    note("No WebGPU");
-    explain(
-      gpu
-        ? "This browser has WebGPU, but it gave no GPU to use."
-        : /Android/.test(navigator.userAgent) && /Chrome\//.test(navigator.userAgent)
-          ? "This browser has no WebGPU. Chrome on Android turns WebGPU off under Advanced Protection and on some GPUs. Firefox with WebGPU on can work."
-          : "This browser has no WebGPU, which the demo needs.",
-    );
+    set("s-load", "–", "cannot run here");
+    note("No WebGPU or WebAssembly SIMD");
+    explain("This browser has neither WebGPU nor WebAssembly SIMD, and the demo needs one of them.");
     return;
   }
-  const info = adapter.info;
-  const gpuName = `GPU: ${[info.vendor, info.architecture].filter(Boolean).join(" ") || "unknown"}`;
+  let backendName = adapter ? "webgpu" : "cpu";
+  const info = adapter?.info;
+  const gpuName = info
+    ? `GPU: ${[info.vendor, info.architecture].filter(Boolean).join(" ") || "unknown"}`
+    : gpu
+      ? "CPU: this browser gave no GPU"
+      : "CPU: this browser has no WebGPU";
   const text = $<HTMLTextAreaElement>("text");
   /** Stops what is speaking (set once the player below exists). */
   let stopAll = () => {};
@@ -435,13 +455,16 @@ async function demo(redrawBars: () => void) {
   /** Each model once loaded (or loading), and the one the controls speak with. */
   const loads = new Map<ModelId, Promise<Phonon>>();
   let tts: Phonon | null = null;
+  /** The CPU's threads and build, once a model has loaded there. */
+  let cpuName: string | null = null;
   const language = () => tts?.voices.find((v) => v.name === voice.value)?.language ?? "en";
   /** Shows the chosen model's state: its download before it loads, then its load time. */
   /** Each loaded model's first audio after its load, and whether the load downloaded it. */
   const started = new Map<ModelId, { ms: number; downloaded: boolean }>();
   const describe = () => {
     const m = MODELS[id()];
-    note(m.license === "Apache-2.0" ? gpuName : `${gpuName} · CC BY-NC 4.0, non-commercial`);
+    const where = cpuName ?? gpuName;
+    note(m.license === "Apache-2.0" ? where : `${where} · CC BY-NC 4.0, non-commercial`);
     const start = started.get(id());
     if (start) set("s-load", ms(start.ms), start.downloaded ? "first visit" : "cold start");
     else set("s-load", `${downloadMb(id())} MB`, "download");
@@ -487,6 +510,10 @@ async function demo(redrawBars: () => void) {
         },
       });
       const loaded = performance.now() - t0;
+      if (p.backend.name === "cpu") {
+        backendName = `cpu, ${p.backend.threads} threads, ${p.backend.simd}`;
+        cpuName = `CPU: ${p.backend.threads} ${p.backend.threads === 1 ? "thread" : "threads"}, ${p.backend.simd === "relaxed" ? "relaxed SIMD" : "SIMD"}`;
+      }
       if (which !== id()) return p;
       tts = p;
       showVoices(p);
@@ -494,7 +521,7 @@ async function demo(redrawBars: () => void) {
       const start = loaded + (await warmUp(p));
       // A first visit here depends on this connection, and the chart's are at 50 Mbit/s: only a
       // cold start of the benchmarked model joins the chart.
-      if (!downloaded && which === BENCHMARKED) mine.coldStartMs = start;
+      if (!downloaded && which === BENCHMARKED && p.backend.name === "webgpu") mine.coldStartMs = start;
       started.set(which, { ms: start, downloaded });
       if (which === id()) describe();
       redrawBars();
@@ -685,7 +712,7 @@ async function demo(redrawBars: () => void) {
       live();
       last = speech;
       audioEnd = speech.audio.length / 24000;
-      if (id() === BENCHMARKED) {
+      if (id() === BENCHMARKED && tts?.backend.name === "webgpu") {
         mine.warmRealtime = made / ((performance.now() - t0) / 1000);
         mine.warmFirstMs = first;
       }

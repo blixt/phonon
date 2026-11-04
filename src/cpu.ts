@@ -7,6 +7,20 @@ import type { Tensor } from "./checkpoint";
 import type * as G from "./graph";
 import { S_MAX } from "./lm";
 
+/** A GEMM tile (dot products of rows x 4 or 2 x 8 columns, or broadcasts of rows x 8 or 16)
+ *  and the GEMV's arithmetic. */
+export interface Variant {
+  tile: { dot: boolean; rows: number; cols: number };
+  gemv: "f32" | "int16";
+}
+export const TILES: Variant["tile"][] = [
+  { dot: true, rows: 2, cols: 4 },
+  { dot: true, rows: 4, cols: 4 },
+  { dot: true, rows: 2, cols: 8 },
+  { dot: false, rows: 8, cols: 8 },
+  { dot: false, rows: 4, cols: 16 },
+];
+
 export interface CpuBuf {
   ptr: number;
   size: number;
@@ -19,6 +33,8 @@ export interface CpuExports {
   setup(threads: number, scratch: number, per: number): void;
   rope_table(freqs: number, out: number, n: number): void;
   worker(i: number): void;
+  set_tile(dot: number, rows: number, cols: number): void;
+  set_gemv(mode: number): void;
   __heap_base: WebAssembly.Global;
   __stack_pointer: WebAssembly.Global;
 }
@@ -46,12 +62,95 @@ const ACT: Record<G.Act, number> = { none: 0, gelu: 1, silu: 2 };
 const GATE: Record<G.Gate, number> = { none: 0, step: 1, chunk: 2 };
 const LOAD = { linear: 0, conv: 1, convT: 2 } as const;
 const PAGE = 65536;
-/** Each thread's scratch: a GEMM's packed weights (K x 8 floats) and attention scores. */
-const SCRATCH_PER = 160 * 1024;
+/** Each thread's scratch: a GEMM's packed weights (K x 16 floats) and attention scores. */
+const SCRATCH_PER = 256 * 1024;
 /** Each pool thread's stack. */
 export const STACK = 256 * 1024;
 
+/** The memory's largest size, in pages: the module allows 1 GiB. */
+const MAX_PAGES = 16384;
+
+/** Modules that validate only with relaxed SIMD (i8x16.relaxed_swizzle), or with SIMD128. */
+const RELAXED = new Uint8Array([
+  0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 15, 1, 13, 0, 65, 0, 253, 15, 65, 0, 253, 15, 253,
+  128, 2, 11,
+]);
+const SIMD = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11]);
+export function simdLevel(): "relaxed" | "simd" | null {
+  if (WebAssembly.validate(RELAXED)) return "relaxed";
+  if (WebAssembly.validate(SIMD)) return "simd";
+  return null;
+}
+
+/** The module with its memory import made unshared, for a page that is not cross-origin
+ *  isolated: one flag byte in the import section. */
+export function unshare(bytes: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
+  let at = 8;
+  const leb = () => {
+    let v = 0;
+    let shift = 0;
+    for (;;) {
+      const b = bytes[at++];
+      v |= (b & 0x7f) << shift;
+      if (!(b & 0x80)) return v >>> 0;
+      shift += 7;
+    }
+  };
+  while (at < bytes.length) {
+    const id = bytes[at++];
+    const size = leb();
+    const end = at + size;
+    if (id === 2) {
+      const skip = () => {
+        const n = leb();
+        at += n;
+      };
+      for (let n = leb(); n > 0; n--) {
+        skip();
+        skip();
+        const kind = bytes[at++];
+        if (kind === 2) {
+          if (bytes[at] & 2) bytes[at] &= ~2;
+          return bytes;
+        }
+        if (kind === 0) leb();
+        else if (kind === 1) {
+          at++;
+          const flags = bytes[at++];
+          leb();
+          if (flags & 1) leb();
+        } else if (kind === 3) at += 2;
+        else throw new Error("Unexpected import");
+      }
+    }
+    at = end;
+  }
+  return bytes;
+}
+
+/** The module, compiled and instantiated over a new memory of at least `bytes`: shared when
+ *  `shared`, else with its memory import made unshared. */
+export async function instantiate(wasm: Uint8Array<ArrayBuffer>, shared: boolean, bytes: number) {
+  const module = await WebAssembly.compile(shared ? wasm : unshare(wasm));
+  const need = Math.ceil(bytes / PAGE);
+  let memory: WebAssembly.Memory | null = null;
+  for (const maximum of [MAX_PAGES, 8192, 6144, 4096]) {
+    try {
+      memory = new WebAssembly.Memory({ initial: Math.min(need, maximum), maximum, shared } as WebAssembly.MemoryDescriptor);
+      break;
+    } catch {
+      /* a smaller reservation */
+    }
+  }
+  if (!memory) throw new Error("No memory for the CPU engine.");
+  const instance = await WebAssembly.instantiate(module, { env: { memory } });
+  return { module, memory, exports: { ...(instance.exports as unknown as CpuExports), memory } };
+}
+
 const f32bits = (v: number) => new Uint32Array(new Float32Array([v]).buffer)[0];
+declare const __PROFILE__: boolean;
+/** A build with --define:__PROFILE__=true times each op by its label, and logs the totals. */
+const PROFILE = typeof __PROFILE__ !== "undefined" && __PROFILE__;
 
 class Staging implements G.Staging {
   readonly bytes: ArrayBuffer;
@@ -170,9 +269,50 @@ export class CpuGraph implements G.Graph<CpuBuf, CpuOp> {
   }
   async ready() {}
 
+  readonly labels = new Map<number, string>();
+  readonly times = new Map<string, number>();
+  /** Kernel variants that compute the same ops (cpu/src/pool.rs), for the fastest on a device. */
+  tune(v: Variant) {
+    this.x.set_tile(v.tile.dot ? 1 : 0, v.tile.rows, v.tile.cols);
+    this.x.set_gemv(v.gemv === "int16" ? 1 : 0);
+  }
+
+  /** The fastest GEMM tile here: each of TILES on two of the codec's products, best of three. */
+  fastestTile(): Variant["tile"] {
+    const M = 32;
+    const x = this.buffer((M + 6) * 512 * 4);
+    const h = this.buffer(M * 2048 * 4);
+    const ops = [
+      ...this.gemm(x, "d0.fc1", h, { M, K: 512, N: 2048, gate: "none" }),
+      ...this.gemm(x, "s0.w", h, { M, K: 7 * 512, N: 512, gate: "none", load: "conv", conv: { cin: 512, k: 7 } }),
+    ];
+    let best = { tile: TILES[0], ms: Infinity };
+    for (const tile of TILES) {
+      this.tune({ tile, gemv: "int16" });
+      this.exec(ops);
+      for (let i = 0; i < 3; i++) {
+        const t = performance.now();
+        this.exec(ops);
+        const ms = performance.now() - t;
+        if (ms < best.ms) best = { tile, ms };
+      }
+    }
+    return best.tile;
+  }
+
   /** Runs ops now, in one call. */
   exec(ops: CpuOp[]) {
     if (!ops.length) return;
+    if (PROFILE) {
+      for (const op of ops) {
+        new Uint32Array(this.x.memory.buffer, this.list.ptr, 1)[0] = op;
+        const t = performance.now();
+        this.x.run(this.list.ptr, 1);
+        const label = this.labels.get(op) ?? "copy";
+        this.times.set(label, (this.times.get(label) ?? 0) + performance.now() - t);
+      }
+      return;
+    }
     if (ops.length * 4 > this.list.size) this.list = this.buffer(ops.length * 8);
     new Uint32Array(this.x.memory.buffer, this.list.ptr, ops.length).set(ops);
     this.x.run(this.list.ptr, ops.length);
@@ -196,8 +336,11 @@ export class CpuGraph implements G.Graph<CpuBuf, CpuOp> {
     const words = [KIND[kind], ...fields.map((f) => given[f] ?? 0), ...extra];
     const b = this.buffer(words.length * 4);
     new Uint32Array(this.x.memory.buffer, b.ptr, words.length).set(words.map((v) => v >>> 0));
+    if (PROFILE) this.labels.set(b.ptr, kind === "gemv" || kind === "gemm" ? this.label : kind);
     return b.ptr;
   }
+  /** The name the next ops are timed under, in a profile build. */
+  label = "";
   private tensor(name: string): Tensor {
     const t = this.tensors[name];
     if (!t) throw new Error(`No tensor ${name}`);
@@ -245,6 +388,7 @@ export class CpuGraph implements G.Graph<CpuBuf, CpuOp> {
     const { ln, combine } = o;
     const res = o.res ?? "none";
     const w = this.q8(wname);
+    if (PROFILE) this.label = `gemv ${wname.replace(/\d+/g, "")}`;
     return this.desc("gemv", {
       x: x?.ptr,
       xo: o.xo,
@@ -293,6 +437,7 @@ export class CpuGraph implements G.Graph<CpuBuf, CpuOp> {
       ops.push(op);
       src = this.elu.ptr;
     }
+    if (PROFILE) this.label = `${wname.replace(/\d+/g, "")} M${o.M}`;
     const op = this.desc("gemm", {
       x: src,
       ...this.t(wname),

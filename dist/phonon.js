@@ -1,3 +1,101 @@
+var __defProp = Object.defineProperty;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __esm = (fn, res, err) => function __init() {
+  if (err) throw err[0];
+  try {
+    return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
+  } catch (e) {
+    throw err = [e], e;
+  }
+};
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
+};
+
+// src/remote.ts
+var remote_exports = {};
+__export(remote_exports, {
+  CpuEngine: () => CpuEngine
+});
+var CpuEngine;
+var init_remote = __esm({
+  "src/remote.ts"() {
+    "use strict";
+    CpuEngine = class _CpuEngine {
+      /** Threads that take part in each op, this worker's included. */
+      threads;
+      /** The WebAssembly build: "relaxed" (relaxed SIMD) or "simd". */
+      simd;
+      worker;
+      voices = /* @__PURE__ */ new Set();
+      jobs = /* @__PURE__ */ new Map();
+      next = 1;
+      constructor(worker, info) {
+        this.worker = worker;
+        this.threads = info.threads;
+        this.simd = info.simd;
+        worker.onmessage = (e) => this.hear(e.data);
+      }
+      /** Starts the worker with a model's packed weights (moved to it, not copied). */
+      static async start(packed, align, threads) {
+        const worker = new Worker(new URL("./phonon-cpu.js", import.meta.url), { type: "module" });
+        const info = await new Promise((resolve, reject) => {
+          worker.onmessage = (e) => {
+            if (e.data.type === "loaded") resolve(e.data);
+            else if (e.data.type === "error") reject(new Error(e.data.message));
+          };
+          worker.onerror = (e) => reject(new Error(e.message || "The CPU engine's worker failed to start."));
+          const m = { type: "load", packed, align, threads };
+          worker.postMessage(m, [packed]);
+        });
+        return new _CpuEngine(worker, info);
+      }
+      hasVoice(name) {
+        return this.voices.has(name);
+      }
+      synthesize(ids, voice, options = {}) {
+        const id = this.next++;
+        const { seed, pace, words, latents } = options;
+        const m = { type: "speak", id, ids, voice, options: { seed, pace, words } };
+        if (!this.voices.has(voice) && latents) {
+          m.latents = latents.slice();
+          this.voices.add(voice);
+        }
+        return new Promise((done, fail) => {
+          this.jobs.set(id, { options, chunks: [], done, fail, cancelSent: false });
+          this.worker.postMessage(m, m.latents ? [m.latents.buffer] : []);
+        });
+      }
+      hear(m) {
+        if (m.type === "loaded" || m.id === void 0) return;
+        const job = this.jobs.get(m.id);
+        if (!job) return;
+        if (m.type === "error") {
+          this.jobs.delete(m.id);
+          job.fail(new Error(m.message));
+          return;
+        }
+        if (m.type === "done") {
+          this.jobs.delete(m.id);
+          job.done(m.cancelled ? null : { chunks: job.chunks });
+          return;
+        }
+        if (job.options.cancelled?.()) {
+          if (!job.cancelSent) this.worker.postMessage({ type: "cancel", id: m.id });
+          job.cancelSent = true;
+          return;
+        }
+        if (m.type === "rows") job.options.onRows?.(m.rows);
+        else {
+          job.chunks.push(m.samples);
+          job.options.onChunk?.(m.samples);
+        }
+      }
+    };
+  }
+});
+
 // src/pace.ts
 var H = 512;
 function matvec(w, x, rows) {
@@ -44,8 +142,659 @@ function paceForSpeed(speed) {
   return d0 + (speed - s0) / (s1 - s0) * (d1 - d0);
 }
 
-// src/kernels.ts
+// src/graph.ts
 var STATE = { pos: 0, frame: 1, end: 2, chunk: 3, text: 4, after: 5, seed: 6, scale: 7 };
+var Q8_GROUP = 32;
+
+// src/checkpoint.ts
+var lmLayers = (m) => Object.keys(m.tensors).filter((n) => /^l\d+\.qkv$/.test(n)).length;
+function readSafetensors(buffer) {
+  const view = new DataView(buffer);
+  const headerSize = Number(view.getBigUint64(0, true));
+  const header = JSON.parse(
+    new TextDecoder().decode(new Uint8Array(buffer, 8, headerSize))
+  );
+  const base = 8 + headerSize;
+  const out = /* @__PURE__ */ new Map();
+  for (const [name, t] of Object.entries(header)) {
+    if (name === "__metadata__") continue;
+    const [start, end] = t.data_offsets;
+    const bytes = buffer.slice(base + start, base + end);
+    let data;
+    if (t.dtype === "F32") data = new Float32Array(bytes);
+    else if (t.dtype === "BF16") {
+      const src = new Uint16Array(bytes);
+      const bits = new Uint32Array(src.length);
+      for (let i = 0; i < src.length; i++) bits[i] = src[i] << 16;
+      data = new Float32Array(bits.buffer);
+    } else throw new Error(`Unexpected tensor type ${t.dtype} for ${name}`);
+    out.set(name, { shape: t.shape, data });
+  }
+  return out;
+}
+function toF16(values) {
+  const f = new Float32Array(1);
+  const u = new Uint32Array(f.buffer);
+  const out = new Uint16Array(values.length);
+  for (let i = 0; i < values.length; i++) {
+    f[0] = values[i];
+    const x = u[0];
+    const sign = x >>> 16 & 32768;
+    const exp = x >>> 23 & 255;
+    let mant = x & 8388607;
+    if (exp === 255) {
+      out[i] = sign | 31744 | (mant ? 512 : 0);
+      continue;
+    }
+    const e = exp - 127 + 15;
+    if (e >= 31) {
+      out[i] = sign | 31744;
+      continue;
+    }
+    if (e <= 0) {
+      if (e < -10) {
+        out[i] = sign;
+        continue;
+      }
+      mant |= 8388608;
+      const shift = 14 - e;
+      let half2 = mant >> shift;
+      const rest2 = mant & (1 << shift) - 1;
+      const mid = 1 << shift - 1;
+      if (rest2 > mid || rest2 === mid && half2 & 1) half2++;
+      out[i] = sign | half2;
+      continue;
+    }
+    let half = e << 10 | mant >> 13;
+    const rest = mant & 8191;
+    if (rest > 4096 || rest === 4096 && half & 1) half++;
+    out[i] = sign | half;
+  }
+  return out;
+}
+function unpackModel(buffer) {
+  const length = new DataView(buffer).getUint32(0, true);
+  const header = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, 4, length)));
+  let o = Math.ceil((4 + length) / 4) * 4;
+  const pace = {};
+  for (const [k, n] of header.pace) {
+    pace[k] = new Float32Array(buffer, o, n);
+    o += n * 4;
+  }
+  return { tensors: header.tensors, pace, blob: new Uint8Array(buffer, o) };
+}
+function readVoice(buffer) {
+  const t = readSafetensors(buffer).get("speaker_wavs");
+  if (!t) throw new Error("The voice file has no speaker_wavs");
+  const [, channels, frames] = t.shape;
+  const out = new Float32Array(frames * channels);
+  for (let c = 0; c < channels; c++)
+    for (let f = 0; f < frames; f++) out[f * channels + c] = t.data[c * frames + f];
+  return out;
+}
+
+// src/files.ts
+var hubFile = (repo, revision, path) => `https://huggingface.co/${repo}/resolve/${revision}/${path}`;
+var MODEL_CACHE = "phonon-webgpu";
+var DEFAULT_VOICE = { en: "Delia", fr: "Augustin", de: "Mats", es: "Marcos", pt: "Davi" };
+var FORTY_REPO = "blixt/phonon-40m-webgpu";
+var FORTY_REVISION = "dde41aa27ed6bed7c874621d8b17e77dfece21bf";
+var fortyM = (name, revision, languages, align) => ({
+  source: { repo: `gradium/${name}`, revision },
+  weights: hubFile(FORTY_REPO, FORTY_REVISION, `${name}.int8.bin`),
+  tokenizer: hubFile(FORTY_REPO, FORTY_REVISION, `${name}.tokenizer.5.0.0.json`),
+  languages,
+  license: "CC-BY-NC-4.0",
+  align
+});
+var MODELS = {
+  "phonon-31m-en": {
+    source: { repo: "gradium/phonon-31m-en", revision: "92741c5b07d085ff840e26fea8ce43110b87852f" },
+    weights: hubFile("blixt/phonon-31m-en-webgpu", "f4635a6dddaa6072451e0155c03c97fbe889b6ec", "phonon-31m-en.int8.bin"),
+    tokenizer: "tokenizer.5.0.0.json",
+    languages: ["en"],
+    license: "Apache-2.0",
+    align: { layer: 3, head: 0, lag: 3 }
+  },
+  "phonon-40m-en": fortyM("phonon-40m-en", "bc7e8ae7e543a7a3e4604753e42fbda76ddf0781", ["en"], { layer: 6, head: 0, lag: 3 }),
+  "phonon-40m-fr": fortyM("phonon-40m-fr", "d91086970206b88efd2c88ca971d0628b5968f0f", ["fr"], { layer: 4, head: 1, lag: 3 }),
+  "phonon-40m-de": fortyM("phonon-40m-de", "79cfc7b47fcfc0b666657b981eb366415023a862", ["de"], { layer: 3, head: 5, lag: 2 }),
+  "phonon-40m-es": fortyM("phonon-40m-es", "e5e052b26e31abd5918ade71d3135e69d51a66f8", ["es"], { layer: 4, head: 6, lag: 3 }),
+  "phonon-40m-pt": fortyM("phonon-40m-pt", "4cbfd742a1555d60eb5399c6d296e9f2e07389e9", ["pt"], { layer: 4, head: 2, lag: 3 }),
+  "phonon-40m-multilingual": fortyM("phonon-40m-multilingual", "1537ce46c64f42903e0d608b132ccb073dac46d2", ["en", "fr", "de", "es", "pt"], { layer: 4, head: 1, lag: 3 })
+};
+var tokenizerUrl = (m) => m.tokenizer.startsWith("https:") ? m.tokenizer : hubFile(m.source.repo, m.source.revision, m.tokenizer);
+var VOICES_REPO = "gradium/phonon-voices";
+var VOICES_REVISION = "0ee17205f254b5abc43b266c8a0f215565c352f7";
+var CATALOG_URL = hubFile(VOICES_REPO, VOICES_REVISION, "voices.jsonl");
+var voiceUrl = (id) => hubFile(VOICES_REPO, VOICES_REVISION, `voices/${id}.safetensors`);
+
+// src/lm.ts
+var H2 = 512;
+var FF = 2048;
+var PROMPT = 125;
+var S_MAX = 1024;
+var F_MAX = 768;
+var TEXT_MAX = 240;
+var PREFILL = [64, 128, 192, 256];
+var BOS = 4294967294;
+var PAD = 4294967295;
+var LN_EPS = "1e-5";
+var FLOW_LN_EPS = "1e-6";
+var ROPE_THETA = "10000.0";
+var EOS_THRESHOLD = "4.0";
+var SPLITS = 8;
+function rowBuffers(g, rows) {
+  const r = (n) => g.buffer(rows * n * 4);
+  return { x: r(H2), h: r(H2), qkv: r(3 * H2), q: r(H2), att: r(H2), ff: r(FF) };
+}
+function layerRows(g, pre, o) {
+  const { B, rows, cache } = o;
+  const gate = cache.kind === "codec" ? "chunk" : "none";
+  const at = { rows, pos0: o.pos0 };
+  const kv = [
+    g.layernorm(B.x, B.h, rows, `${pre}.ln1.w`, `${pre}.ln1.b`, LN_EPS, gate),
+    ...g.gemm(B.h, `${pre}.qkv`, B.qkv, { M: rows, K: H2, N: 3 * H2, gate }),
+    g.ropeKV(B.qkv, B.q, o.kc, o.vc, at, { theta: ROPE_THETA, cache })
+  ];
+  if (o.kvOnly) return kv;
+  return [
+    ...kv,
+    g.attention(B.q, o.kc, o.vc, B.att, at, { cache }),
+    ...g.gemm(B.att, `${pre}.o`, B.x, { M: rows, K: H2, N: H2, res: "add", rbuf: B.x, gate }),
+    g.layernorm(B.x, B.h, rows, `${pre}.ln2.w`, `${pre}.ln2.b`, LN_EPS, gate),
+    ...g.gemm(B.h, `${pre}.fc1`, B.ff, { M: rows, K: H2, N: FF, act: "gelu", gate }),
+    ...g.gemm(B.ff, `${pre}.fc2`, o.out?.buf ?? B.x, {
+      M: rows,
+      K: FF,
+      N: H2,
+      res: "add",
+      rbuf: B.x,
+      yo: o.out?.yo ?? 0,
+      gate
+    })
+  ];
+}
+var LanguageModel = class {
+  /** The latents made so far, one row of 32 per frame. */
+  lats;
+  /** One step: a latent, then the next position. */
+  step;
+  /** The alignment head's scores over the text, one row of TEXT_MAX per frame. */
+  align;
+  g;
+  rows;
+  kc;
+  vc;
+  ids;
+  /** The BOS row's output on its way to row 0, where the step's tail reads. */
+  bos;
+  voiceIn;
+  voiceOps;
+  prefills;
+  tail;
+  cond;
+  ada;
+  fh;
+  ft;
+  z;
+  lat;
+  parts;
+  depth;
+  /** The head that follows the text as it speaks (files.ts), its scores kept for word times. */
+  alignLayer;
+  alignAt;
+  constructor(g, depth, align) {
+    this.g = g;
+    this.depth = depth;
+    this.alignLayer = align.layer;
+    this.alignAt = { lo: PROMPT, width: TEXT_MAX, head: align.head };
+    const rows = PREFILL.at(-1);
+    this.rows = rowBuffers(g, rows);
+    this.kc = Array.from({ length: depth }, () => g.buffer(S_MAX * H2 * g.kvBytes));
+    this.vc = Array.from({ length: depth }, () => g.buffer(S_MAX * H2 * g.kvBytes));
+    this.cond = g.buffer(H2 * 4);
+    this.ada = g.buffer(10240 * 4);
+    this.fh = g.buffer(H2 * 4);
+    this.ft = g.buffer(H2 * 4);
+    this.z = g.buffer(32 * 4);
+    this.lat = g.buffer(32 * 4);
+    this.lats = g.buffer(F_MAX * 32 * 4);
+    this.ids = g.buffer(rows * 4);
+    this.bos = g.buffer(H2 * 4);
+    this.parts = g.buffer(SPLITS * 8 * 66 * 4);
+    this.voiceIn = g.buffer(PROMPT * H2 * 4);
+    this.align = g.buffer(F_MAX * TEXT_MAX * 4);
+    this.tail = this.tailOps();
+    this.step = [...Array.from({ length: depth }, (_, i) => this.stepLayer(i)).flat(), ...this.tail];
+    this.voiceOps = [
+      ...g.gemm(this.voiceIn, "prompt_proj", this.rows.x, { M: PROMPT, K: H2, N: H2, gate: "none" }),
+      ...this.layers(PROMPT)
+    ];
+    this.prefills = new Map(
+      PREFILL.map((n) => [
+        n,
+        [g.embedRows(this.ids, this.rows.x, n, { bos: BOS, pad: PAD }), ...this.layers(n, PROMPT)]
+      ])
+    );
+  }
+  /** The layers over `rows` rows from position `pos0`, in the prefill's way, and for a text's
+   *  prefill frame 0's alignment row. */
+  layers(rows, pos0 = 0) {
+    const { g } = this;
+    return Array.from({ length: this.depth }, (_, i) => [
+      ...layerRows(g, `l${i}`, {
+        B: this.rows,
+        rows,
+        kc: this.kc[i],
+        vc: this.vc[i],
+        cache: { kind: "lm" },
+        pos0,
+        kvOnly: !pos0 && i === this.depth - 1
+      }),
+      ...pos0 && i === this.alignLayer ? [g.alignRow(this.rows.q, this.kc[i], this.align, this.alignAt)] : []
+    ]).flat();
+  }
+  /** A voice's prompt rows through every layer, its keys and values kept in a new buffer. */
+  voice(latents) {
+    const { g } = this;
+    const bytes = PROMPT * H2 * g.kvBytes;
+    const kv = g.buffer(2 * this.depth * bytes);
+    g.write(this.voiceIn, 0, latents);
+    const enc = g.encoder();
+    enc.run(this.voiceOps);
+    for (let i = 0; i < this.depth; i++) {
+      enc.copy(this.kc[i], 0, kv, 2 * i * bytes, bytes);
+      enc.copy(this.vc[i], 0, kv, (2 * i + 1) * bytes, bytes);
+    }
+    enc.submit();
+    return kv;
+  }
+  /** Sets up a text in a voice (its keys and values from `voice`) and encodes its prefill, which
+   *  makes frame 0. The state's position starts on BOS, and frame 0's step moves it past. */
+  start(enc, ids, voice, seed, temperature, framesAfterEos) {
+    const { g } = this;
+    const n = PREFILL.find((p) => p > ids.length);
+    const padded = new Uint32Array(n).fill(PAD);
+    padded.set(ids);
+    padded[ids.length] = BOS;
+    g.write(this.ids, 0, padded);
+    const state = new Uint32Array(8);
+    state[STATE.pos] = PROMPT + ids.length;
+    state[STATE.after] = framesAfterEos;
+    state[STATE.text] = ids.length;
+    state[STATE.seed] = seed >>> 0;
+    new Float32Array(state.buffer)[STATE.scale] = Math.sqrt(temperature);
+    g.write(g.state, 0, state);
+    const bytes = PROMPT * H2 * g.kvBytes;
+    for (let i = 0; i < this.depth; i++) {
+      enc.copy(voice, 2 * i * bytes, this.kc[i], 0, bytes);
+      enc.copy(voice, (2 * i + 1) * bytes, this.vc[i], 0, bytes);
+    }
+    enc.run(this.prefills.get(n));
+    enc.copy(this.rows.x, ids.length * H2 * 4, this.bos, 0, H2 * 4);
+    enc.copy(this.bos, 0, this.rows.x, 0, H2 * 4);
+    enc.run(this.tail);
+  }
+  /** A step's layer: one row at the state's position, attention split over the keys. */
+  stepLayer(i) {
+    const { g } = this;
+    const B = this.rows;
+    const pre = `l${i}`;
+    return [
+      g.gemv(B.x, `${pre}.qkv`, B.qkv, {
+        K: H2,
+        N: 3 * H2,
+        ln: { w: `${pre}.ln1.w`, b: `${pre}.ln1.b`, eps: LN_EPS }
+      }),
+      g.attnStep(B.qkv, this.kc[i], this.vc[i], this.parts, {
+        splits: SPLITS,
+        theta: ROPE_THETA,
+        align: i === this.alignLayer ? { at: this.alignAt, buf: this.align } : void 0
+      }),
+      g.gemv(null, `${pre}.o`, B.x, {
+        K: H2,
+        N: H2,
+        res: "add",
+        rbuf: B.x,
+        combine: { splits: SPLITS, parts: this.parts }
+      }),
+      g.gemv(B.x, `${pre}.fc1`, B.ff, {
+        K: H2,
+        N: FF,
+        act: "gelu",
+        ln: { w: `${pre}.ln2.w`, b: `${pre}.ln2.b`, eps: LN_EPS }
+      }),
+      g.gemv(B.ff, `${pre}.fc2`, B.x, { K: FF, N: H2, res: "add", rbuf: B.x })
+    ];
+  }
+  /** From the final hidden state (row 0 of x): the flow head samples the next latent, then its
+   *  EOS logit, the next input row and the next position. */
+  tailOps() {
+    const { g } = this;
+    const x = this.rows.x;
+    const blocks = Array.from({ length: 6 }, (_, i) => {
+      const a = i * 1536;
+      return [
+        g.gemv(this.fh, `fh${i}.fc1.w`, this.ft, {
+          K: H2,
+          N: H2,
+          bias: `fh${i}.fc1.b`,
+          act: "silu",
+          ln: {
+            w: `fh${i}.ln.w`,
+            b: `fh${i}.ln.b`,
+            eps: FLOW_LN_EPS,
+            mod: this.ada,
+            ho: a,
+            so: a + 512
+          }
+        }),
+        g.gemv(this.ft, `fh${i}.fc2.w`, this.fh, {
+          K: H2,
+          N: H2,
+          bias: `fh${i}.fc2.b`,
+          res: "gate",
+          rbuf: this.fh,
+          gbuf: this.ada,
+          go: a + 1024
+        })
+      ];
+    }).flat();
+    const fa = 6 * 1536;
+    return [
+      g.gemv(x, "fh.cond.w", this.cond, {
+        K: H2,
+        N: H2,
+        bias: "fh.cond.b",
+        act: "silu",
+        ln: { w: "norm.w", b: "norm.b", eps: LN_EPS }
+      }),
+      g.gemv(this.cond, "fh.ada.w", this.ada, { K: H2, N: 10240, bias: "fh.ada.b" }),
+      g.noise(this.z),
+      g.gemv(this.z, "fh.in.w", this.fh, { K: 32, N: H2, bias: "fh.in.b" }),
+      ...blocks,
+      g.gemv(this.fh, "fh.out.w", this.lat, {
+        K: H2,
+        N: 32,
+        bias: "fh.out.b",
+        res: "add",
+        rbuf: this.z,
+        ln: { eps: FLOW_LN_EPS, mod: this.ada, ho: fa, so: fa + 512 }
+      }),
+      g.finishStep(x, this.lat, this.lats, { eps: LN_EPS, threshold: EOS_THRESHOLD }),
+      g.gemv(this.lat, "latent_proj", x, { K: 32, N: H2, res: "vec", vname: "cond" })
+    ];
+  }
+};
+
+// src/codec.ts
+var CHUNKS = [1, 2, 4, 8];
+var C_MAX = 8;
+var FRAME = 1920;
+var WINDOW = 251;
+var RING = 512;
+var Codec = class {
+  /** The last chunk's samples, up to C_MAX * FRAME floats. */
+  audio;
+  g;
+  ops;
+  /** Each stage: `ctx` rows of left context (a reading convolution's (kernel - 1) * dilation),
+   *  then `rate` rows per 200 Hz position. */
+  stages;
+  constructor(g, lats) {
+    this.g = g;
+    const T = 16 * C_MAX;
+    const stage = (ctx, rate, ch) => ({
+      ctx,
+      rate,
+      ch,
+      buf: g.buffer((ctx + rate * T) * ch * 4)
+    });
+    const tr = stage(6, 1, 512);
+    const s0 = stage(1, 1, 512);
+    const s1 = stage(2, 6, 256);
+    const s1h = stage(0, 6, 128);
+    const s1r = stage(1, 6, 256);
+    const s2 = stage(2, 30, 128);
+    const s2h = stage(0, 30, 64);
+    const s2r = stage(1, 30, 128);
+    const s3 = stage(2, 120, 64);
+    const s3h = stage(0, 120, 32);
+    const s3r = stage(2, 120, 64);
+    this.stages = [tr, s0, s1, s1r, s2, s2r, s3, s3r];
+    this.audio = g.buffer(C_MAX * FRAME * 4);
+    const B = rowBuffers(g, T);
+    const rings = [0, 1].map(() => ({ kc: g.buffer(RING * H2 * 4), vc: g.buffer(RING * H2 * 4) }));
+    const gate = "chunk";
+    const opsFor = (C) => {
+      const T2 = 16 * C;
+      const conv = (name, src, dst, o) => {
+        if (src.ctx !== o.k - 1) throw new Error(`${name} reads ${src.ctx} rows of context`);
+        const out = dst === this.audio ? { buf: dst, ctx: 0 } : dst;
+        return g.gemm(src.buf, `${name}.w`, out.buf, {
+          M: src.rate * T2,
+          K: o.k * o.cin,
+          N: o.cout,
+          bias: `${name}.b`,
+          load: "conv",
+          conv: { cin: o.cin, k: o.k, dil: 1, elu: o.elu },
+          res: o.res ? "add" : "none",
+          rbuf: o.res?.buf,
+          ro: o.res ? o.res.ctx * o.cout : 0,
+          yo: out.ctx * o.cout,
+          gate
+        });
+      };
+      const convT = (name, src, dst, o) => g.gemm(src.buf, `${name}.w`, dst.buf, {
+        M: src.rate * T2,
+        K: 2 * o.cin,
+        N: o.cout,
+        bias: `${name}.b`,
+        load: "convT",
+        conv: { cin: o.cin, elu: true, stride: o.s },
+        yo: dst.ctx * o.cout,
+        gate
+      });
+      return [
+        g.upsample(lats, B.x, T2),
+        ...[0, 1].flatMap(
+          (i) => layerRows(g, `d${i}`, {
+            B,
+            rows: T2,
+            ...rings[i],
+            cache: { kind: "codec", window: WINDOW, ring: RING },
+            pos0: 0,
+            out: i === 1 ? { buf: tr.buf, yo: tr.ctx * 512 } : void 0
+          })
+        ),
+        ...conv("s0", tr, s0, { cin: 512, cout: 512, k: 7, elu: false }),
+        ...convT("s1", s0, s1, { cin: 512, cout: 256, s: 6 }),
+        ...conv("s1r1", s1, s1h, { cin: 256, cout: 128, k: 3, elu: true }),
+        ...conv("s1r2", s1h, s1r, { cin: 128, cout: 256, k: 1, elu: true, res: s1 }),
+        ...convT("s2", s1r, s2, { cin: 256, cout: 128, s: 5 }),
+        ...conv("s2r1", s2, s2h, { cin: 128, cout: 64, k: 3, elu: true }),
+        ...conv("s2r2", s2h, s2r, { cin: 64, cout: 128, k: 1, elu: true, res: s2 }),
+        ...convT("s3", s2r, s3, { cin: 128, cout: 64, s: 4 }),
+        ...conv("s3r1", s3, s3h, { cin: 64, cout: 32, k: 3, elu: true }),
+        ...conv("s3r2", s3h, s3r, { cin: 32, cout: 64, k: 1, elu: true, res: s3 }),
+        ...conv("s4", s3r, this.audio, { cin: 64, cout: 1, k: 3, elu: true }),
+        // Each stage keeps its last rows as the next chunk's left context.
+        g.shiftRows(this.stages, T2)
+      ];
+    };
+    this.ops = new Map(CHUNKS.map((c) => [c, opsFor(c)]));
+  }
+  /** Before a text's first chunk: no context yet. */
+  reset(enc) {
+    for (const st of this.stages) enc.clear(st.buf, 0, st.ctx * st.ch * 4);
+  }
+  /** Decodes frames [f0, f0 + size) into `audio`. The position goes to the queue ahead of the
+   *  submit that holds this encoder, so a submit holds one chunk at most. */
+  encodeChunk(enc, f0, size) {
+    this.g.write(this.g.state, STATE.chunk * 4, new Uint32Array([16 * f0]));
+    enc.run(this.ops.get(size));
+  }
+};
+
+// src/engine.ts
+var TEMPERATURE = 0.3;
+var FRAMES_AFTER_EOS = 1;
+var FRAMES_AFTER_EOS_SHORT = 3;
+var SHORT_TEXT_WORDS = 4;
+var FRAMES_PER_SECOND = 12.5;
+var AUDIO_AT = 16;
+var ROWS = Math.max(...CHUNKS);
+var PhononEngine = class {
+  g;
+  model;
+  lm;
+  codec;
+  /** Each voice's prompt keys and values (lm.ts). */
+  voices = /* @__PURE__ */ new Map();
+  stages;
+  rowsAt;
+  pace = Number.NaN;
+  /** Settles when the text in progress has drained. */
+  turn = Promise.resolve();
+  /** `g` holds the model's weights. */
+  constructor(g, model, align) {
+    this.model = model;
+    this.g = g;
+    this.lm = new LanguageModel(this.g, lmLayers(model), align);
+    this.codec = new Codec(this.g, this.lm.lats);
+    this.rowsAt = AUDIO_AT + ROWS * FRAME * 4;
+    this.stages = Array.from({ length: g.depth }, () => g.staging(this.rowsAt + ROWS * TEXT_MAX * 4));
+    this.setPace(0);
+  }
+  /** Settles when every shader has compiled. */
+  ready() {
+    return this.g.ready();
+  }
+  /** Registers a voice by its speaker latents, [125][512]. Its prefill uses the LM's caches, so
+   *  it runs in the queue, before a text (`synthesize`'s `latents`). */
+  addVoice(name, latents) {
+    if (latents.length !== PROMPT * H2)
+      throw new Error(`Voice ${name} has ${latents.length} values`);
+    this.voices.set(name, this.lm.voice(latents));
+  }
+  hasVoice(name) {
+    return this.voices.has(name);
+  }
+  /** The LM's pace (pace.ts): its condition and BOS row are written into the blob, so it is set
+   *  in the queue, before a text (`synthesize`'s `pace`). */
+  setPace(delta) {
+    if (delta === this.pace) return;
+    this.pace = delta;
+    const { cond, bos } = paceVectors(this.model.pace, delta);
+    for (const [name, values] of [
+      ["cond", cond],
+      ["bos_embed", bos]
+    ])
+      this.g.write(this.g.weights, this.model.tensors[name].offset, toF16(values));
+  }
+  /** Text ids to 24 kHz audio in one voice, in chunks as they are made, with the alignment
+   *  head's scores of each kept frame over the text as they are made. Null when cancelled. One
+   *  text at a time: a call waits until the one before has drained, cancelled or not. */
+  synthesize(ids, voice, options = {}) {
+    const next = this.turn.then(() => this.run(ids, voice, options));
+    this.turn = next.then(() => {
+    }, () => {
+    });
+    return next;
+  }
+  async run(ids, voice, { seed = 1, words = Infinity, pace = 0, latents, cancelled = () => false, onChunk, onRows }) {
+    if (!this.voices.has(voice)) {
+      if (!latents) throw new Error(`Unknown voice ${voice}`);
+      this.addVoice(voice, latents);
+    }
+    const kv = this.voices.get(voice);
+    this.setPace(pace);
+    if (!ids.length) return { chunks: [] };
+    if (ids.length > TEXT_MAX) throw new Error(`Text too long: ${ids.length} tokens`);
+    const { g, lm, codec } = this;
+    const maxFrames = Math.min(
+      F_MAX,
+      S_MAX - PROMPT - ids.length - 1,
+      Math.ceil((ids.length / 3 + 2) * FRAMES_PER_SECOND)
+    );
+    const after = words <= SHORT_TEXT_WORDS ? FRAMES_AFTER_EOS_SHORT : FRAMES_AFTER_EOS;
+    let enc = g.encoder();
+    codec.reset(enc);
+    lm.start(enc, ids, kv, seed, TEMPERATURE, after);
+    enc.submit();
+    let issued = 1;
+    let decoded = 0;
+    let made = 0;
+    let rowsCopied = 0;
+    let end = null;
+    const chunks = [];
+    const free = [...this.stages];
+    const inflight = [];
+    const issue = () => {
+      const stage = free.pop();
+      enc = g.encoder();
+      const size = CHUNKS[Math.min(made, CHUNKS.length - 1)];
+      const target = Math.min(maxFrames, end ?? Math.max(issued, decoded + size));
+      const steps = [];
+      for (; issued < target; issued++) steps.push(...lm.step);
+      enc.run(steps);
+      const avail = end ?? issued;
+      let f0 = -1;
+      if (decoded < avail && (decoded + size <= avail || end !== null)) {
+        f0 = decoded;
+        codec.encodeChunk(enc, f0, size);
+        decoded += size;
+        made++;
+      }
+      enc.read(g.state, 0, stage, 0, 16);
+      if (f0 >= 0) enc.read(codec.audio, 0, stage, AUDIO_AT, size * FRAME * 4);
+      const r0 = rowsCopied;
+      if (issued > r0) {
+        if (issued - r0 > ROWS) throw new Error(`${issued - r0} alignment rows in one submit`);
+        const bytes = TEXT_MAX * 4;
+        enc.read(lm.align, r0 * bytes, stage, this.rowsAt, (issued - r0) * bytes);
+        rowsCopied = issued;
+      }
+      enc.submit();
+      inflight.push({ stage, f0, size, n: issued, r0, ready: stage.map() });
+    };
+    const drain = async () => {
+      const job = inflight.shift();
+      await job.ready;
+      const m = job.stage.range();
+      const keep2 = new Uint32Array(m, 0, 4)[STATE.end];
+      if (end === null && keep2) end = Math.min(keep2, maxFrames);
+      if (end === null && job.n >= maxFrames) end = maxFrames;
+      const r1 = Math.min(job.n, end ?? Infinity);
+      if (onRows && r1 > job.r0) {
+        const n = ids.length;
+        const rows = new Float32Array(m, this.rowsAt, (job.n - job.r0) * TEXT_MAX);
+        const out = new Float32Array((r1 - job.r0) * n);
+        for (let r = 0; r < r1 - job.r0; r++) out.set(rows.subarray(r * TEXT_MAX, r * TEXT_MAX + n), r * n);
+        onRows(out);
+      }
+      if (job.f0 >= 0 && (end === null || job.f0 < end)) {
+        const frames = Math.min(job.size, (end ?? Infinity) - job.f0);
+        const chunk = new Float32Array(m, AUDIO_AT, frames * FRAME).slice();
+        chunks.push(chunk);
+        onChunk?.(chunk);
+      }
+      job.stage.unmap();
+      free.push(job.stage);
+    };
+    const finished = () => end !== null && decoded >= end && issued >= end;
+    for (; ; ) {
+      while (!cancelled() && inflight.length < g.depth && !finished()) issue();
+      if (!inflight.length) break;
+      await drain();
+    }
+    if (cancelled()) return null;
+    return { chunks };
+  }
+};
+
+// src/kernels.ts
 var UNIFORMS = {
   layernorm: ["go", "bo"],
   rows: ["rows", "pos0"],
@@ -61,11 +810,10 @@ function struct(fields, types = {}) {
   const pad = Array.from({ length: (4 - fields.length % 4) % 4 }, (_, i) => `p${i}`);
   return `struct P { ${[...fields, ...pad].map((f) => `${f}: ${types[f] ?? "u32"}`).join(", ")} }`;
 }
-var Q8_GROUP = 32;
-var { pos: POS, frame: FRAME, end: END, chunk: CHUNK, text: TEXT, after: AFTER, seed: SEED, scale: SCALE } = STATE;
+var { pos: POS, frame: FRAME2, end: END, chunk: CHUNK, text: TEXT, after: AFTER, seed: SEED, scale: SCALE } = STATE;
 var GATES = {
   none: "",
-  step: `if (st[${END}] != 0u && st[${FRAME}] >= st[${END}]) { return; }`,
+  step: `if (st[${END}] != 0u && st[${FRAME2}] >= st[${END}]) { return; }`,
   chunk: `if (st[${END}] != 0u && st[${CHUNK}] / 16u >= st[${END}]) { return; }`
 };
 var BLOB = `
@@ -274,7 +1022,7 @@ fn pcg(v: u32) -> u32 { var s = v * 747796405u + 2891336453u; let w = ((s >> ((s
 fn main(@builtin(local_invocation_index) i: u32) {
   _ = &z; _ = &st;
   ${GATES.step}
-  let f = st[${FRAME}];
+  let f = st[${FRAME2}];
   let a = pcg(st[${SEED}] ^ pcg(f * 64u + i * 2u)); let b = pcg(a ^ 0x9e3779b9u);
   let u1 = (f32(a >> 8u) + 1.0) / 16777217.0; let u2 = f32(b >> 8u) / 16777216.0;
   z[i] = sqrt(-2.0 * log(u1)) * cos(6.283185307 * u2) * bitcast<f32>(st[${SCALE}]);
@@ -600,7 +1348,7 @@ ${BLOB}
 fn main(@builtin(local_invocation_index) li: u32) {
   _ = &x; _ = &wv; _ = &lat; _ = &lats; _ = &st;
   // st is read_write here, so the gate goes through workgroup memory to stay uniform.
-  if (li == 0u) { ended = select(0u, 1u, st[${END}] != 0u && st[${FRAME}] >= st[${END}]); }
+  if (li == 0u) { ended = select(0u, 1u, st[${END}] != 0u && st[${FRAME2}] >= st[${END}]); }
   if (workgroupUniformLoad(&ended) == 1u) { return; }
   let a = x[li]; let b2 = x[li + 256u];
   red[li] = a + b2; workgroupBarrier();
@@ -614,13 +1362,13 @@ fn main(@builtin(local_invocation_index) li: u32) {
           + ((b2 - mean) * inv * hf(p.ngo + c2) + hf(p.nbo + c2)) * hf(p.ewo + c2);
   workgroupBarrier();
   for (var s = 128u; s > 0u; s >>= 1u) { if (li < s) { red[li] += red[li + s]; } workgroupBarrier(); }
-  let f = st[${FRAME}];
+  let f = st[${FRAME2}];
   if (li < 32u) { lats[f * 32u + li] = lat[li]; }
   let logit = red[0] + hf(p.ebo);
   workgroupBarrier();
   storageBarrier();
   if (li == 0u) {
-    st[${POS}] = st[${POS}] + 1u; st[${FRAME}] = f + 1u;
+    st[${POS}] = st[${POS}] + 1u; st[${FRAME2}] = f + 1u;
     if (st[${END}] == 0u && logit > ${threshold}) { st[${END}] = f + st[${AFTER}] + 1u; }
   }
 }`;
@@ -701,7 +1449,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
   var sum = 0.0;
   for (var j = li; j < cnt; j += 128u) {
     ${align ? `let k = j0 + j - ${align.lo}u;
-    if (h == ${align.head}u && j0 + j >= ${align.lo}u && k < st[${TEXT}]) { al[st[${FRAME}] * ${align.width}u + k] = sc[j]; }` : ""}
+    if (h == ${align.head}u && j0 + j >= ${align.lo}u && k < st[${TEXT}]) { al[st[${FRAME2}] * ${align.width}u + k] = sc[j]; }` : ""}
     let e = exp(sc[j] - mx); sc[j] = e; sum += e;
   }
   red[li] = sum; workgroupBarrier();
@@ -740,134 +1488,12 @@ fn main(@builtin(local_invocation_index) li: u32) {
 }`;
 }
 
-// src/checkpoint.ts
-var lmLayers = (m) => Object.keys(m.tensors).filter((n) => /^l\d+\.qkv$/.test(n)).length;
-function readSafetensors(buffer) {
-  const view = new DataView(buffer);
-  const headerSize = Number(view.getBigUint64(0, true));
-  const header = JSON.parse(
-    new TextDecoder().decode(new Uint8Array(buffer, 8, headerSize))
-  );
-  const base = 8 + headerSize;
-  const out = /* @__PURE__ */ new Map();
-  for (const [name, t] of Object.entries(header)) {
-    if (name === "__metadata__") continue;
-    const [start, end] = t.data_offsets;
-    const bytes = buffer.slice(base + start, base + end);
-    let data;
-    if (t.dtype === "F32") data = new Float32Array(bytes);
-    else if (t.dtype === "BF16") {
-      const src = new Uint16Array(bytes);
-      const bits = new Uint32Array(src.length);
-      for (let i = 0; i < src.length; i++) bits[i] = src[i] << 16;
-      data = new Float32Array(bits.buffer);
-    } else throw new Error(`Unexpected tensor type ${t.dtype} for ${name}`);
-    out.set(name, { shape: t.shape, data });
-  }
-  return out;
-}
-function toF16(values) {
-  const f = new Float32Array(1);
-  const u = new Uint32Array(f.buffer);
-  const out = new Uint16Array(values.length);
-  for (let i = 0; i < values.length; i++) {
-    f[0] = values[i];
-    const x = u[0];
-    const sign = x >>> 16 & 32768;
-    const exp = x >>> 23 & 255;
-    let mant = x & 8388607;
-    if (exp === 255) {
-      out[i] = sign | 31744 | (mant ? 512 : 0);
-      continue;
-    }
-    const e = exp - 127 + 15;
-    if (e >= 31) {
-      out[i] = sign | 31744;
-      continue;
-    }
-    if (e <= 0) {
-      if (e < -10) {
-        out[i] = sign;
-        continue;
-      }
-      mant |= 8388608;
-      const shift = 14 - e;
-      let half2 = mant >> shift;
-      const rest2 = mant & (1 << shift) - 1;
-      const mid = 1 << shift - 1;
-      if (rest2 > mid || rest2 === mid && half2 & 1) half2++;
-      out[i] = sign | half2;
-      continue;
-    }
-    let half = e << 10 | mant >> 13;
-    const rest = mant & 8191;
-    if (rest > 4096 || rest === 4096 && half & 1) half++;
-    out[i] = sign | half;
-  }
-  return out;
-}
-function unpackModel(buffer) {
-  const length = new DataView(buffer).getUint32(0, true);
-  const header = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, 4, length)));
-  let o = Math.ceil((4 + length) / 4) * 4;
-  const pace = {};
-  for (const [k, n] of header.pace) {
-    pace[k] = new Float32Array(buffer, o, n);
-    o += n * 4;
-  }
-  return { tensors: header.tensors, pace, blob: new Uint8Array(buffer, o) };
-}
-function readVoice(buffer) {
-  const t = readSafetensors(buffer).get("speaker_wavs");
-  if (!t) throw new Error("The voice file has no speaker_wavs");
-  const [, channels, frames] = t.shape;
-  const out = new Float32Array(frames * channels);
-  for (let c = 0; c < channels; c++)
-    for (let f = 0; f < frames; f++) out[f * channels + c] = t.data[c * frames + f];
-  return out;
-}
-
-// src/files.ts
-var hubFile = (repo, revision, path) => `https://huggingface.co/${repo}/resolve/${revision}/${path}`;
-var MODEL_CACHE = "phonon-webgpu";
-var DEFAULT_VOICE = { en: "Delia", fr: "Augustin", de: "Mats", es: "Marcos", pt: "Davi" };
-var FORTY_REPO = "blixt/phonon-40m-webgpu";
-var FORTY_REVISION = "dde41aa27ed6bed7c874621d8b17e77dfece21bf";
-var fortyM = (name, revision, languages, align) => ({
-  source: { repo: `gradium/${name}`, revision },
-  weights: hubFile(FORTY_REPO, FORTY_REVISION, `${name}.int8.bin`),
-  tokenizer: hubFile(FORTY_REPO, FORTY_REVISION, `${name}.tokenizer.5.0.0.json`),
-  languages,
-  license: "CC-BY-NC-4.0",
-  align
-});
-var MODELS = {
-  "phonon-31m-en": {
-    source: { repo: "gradium/phonon-31m-en", revision: "92741c5b07d085ff840e26fea8ce43110b87852f" },
-    weights: hubFile("blixt/phonon-31m-en-webgpu", "f4635a6dddaa6072451e0155c03c97fbe889b6ec", "phonon-31m-en.int8.bin"),
-    tokenizer: "tokenizer.5.0.0.json",
-    languages: ["en"],
-    license: "Apache-2.0",
-    align: { layer: 3, head: 0, lag: 3 }
-  },
-  "phonon-40m-en": fortyM("phonon-40m-en", "bc7e8ae7e543a7a3e4604753e42fbda76ddf0781", ["en"], { layer: 6, head: 0, lag: 3 }),
-  "phonon-40m-fr": fortyM("phonon-40m-fr", "d91086970206b88efd2c88ca971d0628b5968f0f", ["fr"], { layer: 4, head: 1, lag: 3 }),
-  "phonon-40m-de": fortyM("phonon-40m-de", "79cfc7b47fcfc0b666657b981eb366415023a862", ["de"], { layer: 3, head: 5, lag: 2 }),
-  "phonon-40m-es": fortyM("phonon-40m-es", "e5e052b26e31abd5918ade71d3135e69d51a66f8", ["es"], { layer: 4, head: 6, lag: 3 }),
-  "phonon-40m-pt": fortyM("phonon-40m-pt", "4cbfd742a1555d60eb5399c6d296e9f2e07389e9", ["pt"], { layer: 4, head: 2, lag: 3 }),
-  "phonon-40m-multilingual": fortyM("phonon-40m-multilingual", "1537ce46c64f42903e0d608b132ccb073dac46d2", ["en", "fr", "de", "es", "pt"], { layer: 4, head: 1, lag: 3 })
-};
-var tokenizerUrl = (m) => m.tokenizer.startsWith("https:") ? m.tokenizer : hubFile(m.source.repo, m.source.revision, m.tokenizer);
-var VOICES_REPO = "gradium/phonon-voices";
-var VOICES_REVISION = "0ee17205f254b5abc43b266c8a0f215565c352f7";
-var CATALOG_URL = hubFile(VOICES_REPO, VOICES_REVISION, "voices.jsonl");
-var voiceUrl = (id) => hubFile(VOICES_REPO, VOICES_REVISION, `voices/${id}.safetensors`);
-
-// src/graph.ts
+// src/gpu.ts
 var STORAGE = 128;
 var UNIFORM = 64;
 var COPY_DST = 8;
 var COPY_SRC = 4;
+var MAP_READ = 1;
 var COMPUTE = 4;
 var SCRATCH = 7.5 * 2 ** 20;
 function encode(enc, ops) {
@@ -894,11 +1520,52 @@ function layoutOf(device, code) {
 function residual2(res, rbuf, ybuf) {
   return rbuf === ybuf ? { res: `${res}_y`, rbuf: void 0 } : { res, rbuf };
 }
-var Graph = class {
+var Staging = class {
+  buf;
+  ready = null;
+  constructor(device, bytes) {
+    this.buf = device.createBuffer({ size: bytes, usage: COPY_DST | MAP_READ });
+  }
+  map() {
+    return this.ready ??= this.buf.mapAsync(MAP_READ);
+  }
+  range() {
+    return this.buf.getMappedRange();
+  }
+  unmap() {
+    this.buf.unmap();
+    this.ready = null;
+  }
+};
+var Encoder = class {
+  device;
+  enc;
+  constructor(device) {
+    this.device = device;
+    this.enc = device.createCommandEncoder();
+  }
+  run(ops) {
+    if (ops.length) encode(this.enc, ops);
+  }
+  copy(src, so, dst, dO, bytes) {
+    this.enc.copyBufferToBuffer(src, so, dst, dO, bytes);
+  }
+  clear(buf, offset, bytes) {
+    this.enc.clearBuffer(buf, offset, bytes);
+  }
+  read(src, so, dst, dO, bytes) {
+    this.enc.copyBufferToBuffer(src, so, dst.buf, dO, bytes);
+  }
+  submit() {
+    this.device.queue.submit([this.enc.finish()]);
+  }
+};
+var GpuGraph = class {
   device;
   weights;
-  /** The LM's and codec's state, slots as kernels.ts STATE names them. */
   state;
+  depth = 3;
+  kvBytes = 2;
   /** Bound where a kernel's binding goes unused. */
   zero;
   /** 32-lane subgroups for the GEMV sums. */
@@ -920,8 +1587,17 @@ var Graph = class {
       size: Math.max(256, Math.ceil(size / 256) * 256),
       usage: STORAGE | COPY_DST | COPY_SRC
     });
-    if (data) this.device.queue.writeBuffer(b, 0, data.buffer, data.byteOffset, data.byteLength);
+    if (data) this.write(b, 0, data);
     return b;
+  }
+  write(buf, offset, data) {
+    this.device.queue.writeBuffer(buf, offset, data.buffer, data.byteOffset, data.byteLength);
+  }
+  encoder() {
+    return new Encoder(this.device);
+  }
+  staging(bytes) {
+    return new Staging(this.device, bytes);
   }
   /** A uniform of a kernel's `fields` (kernels.ts UNIFORMS), 0 where `values` has none. */
   u(fields, values) {
@@ -993,8 +1669,6 @@ var Graph = class {
     this.scratchBuf ??= this.buffer(SCRATCH);
     return { buffer: this.scratchBuf, offset: 0, size: Math.ceil(bytes / 256) * 256 };
   }
-  /** y = epilogue(W x) for one row (x at element `xo`), optionally normalizing x first.
-   *  A step's work, so it returns at once past the end. */
   gemv(x, wname, ybuf, o) {
     const { ln, combine } = o;
     const { res, rbuf } = residual2(o.res ?? "none", o.rbuf, ybuf);
@@ -1024,7 +1698,7 @@ var Graph = class {
     return this.op(
       code,
       [
-        x,
+        x ?? this.zero,
         this.weights,
         ybuf,
         combine?.parts ?? rbuf ?? this.zero,
@@ -1036,7 +1710,6 @@ var Graph = class {
       [Math.ceil(o.N / gemvShape(o.K).rowsPerGroup), 1, 1]
     );
   }
-  /** Y = epilogue(X W^T) over M rows: a linear layer, a convolution or a transposed one. */
   gemm(xbuf, wname, ybuf, o) {
     const { M, K: k, N: n, load = "linear", conv, yo = 0, ro = 0, gate } = o;
     const { res, rbuf } = residual2(o.res ?? "none", o.rbuf, ybuf);
@@ -1101,625 +1774,78 @@ var Graph = class {
   layernorm(x, y, rows, w, b, eps, gate) {
     return this.op(
       layernorm({ eps, gate }),
+      [x, y, this.weights, this.u(UNIFORMS.layernorm, { go: this.half(w), bo: this.half(b) }), this.state],
+      [rows, 1, 1]
+    );
+  }
+  ropeKV(qkv, q, kc, vc, at, o) {
+    return this.op(ropeKV(o), [qkv, q, kc, vc, this.state, this.u(UNIFORMS.rows, at)], [at.rows, 1, 1]);
+  }
+  attention(q, kc, vc, out, at, o) {
+    return this.op(
+      attention(o),
+      [q, kc, vc, out, this.state, this.u(UNIFORMS.rows, at)],
+      [Math.ceil(at.rows / 16), 8, 1]
+    );
+  }
+  attnStep(qkv, kc, vc, parts2, o) {
+    const code = attnSplit({ splits: o.splits, theta: o.theta, sg: this.sg, align: o.align?.at });
+    const bindings = [qkv, kc, vc, parts2, this.state];
+    return this.op(code, o.align ? [...bindings, o.align.buf] : bindings, [o.splits, 8, 1]);
+  }
+  alignRow(q, kc, al, at) {
+    return this.op(alignRow(at), [q, kc, al, this.state], [1, 1, 1]);
+  }
+  embedRows(ids, x, rows, o) {
+    const em = this.q8("embed");
+    return this.op(
+      embedRows(o),
+      [ids, this.weights, x, this.u(UNIFORMS.embedRows, { eo: em.wo, eso: em.wso, bo: this.half("bos_embed") })],
+      [rows * 512 / 256, 1, 1]
+    );
+  }
+  noise(z) {
+    return this.op(noise(), [z, this.state], [1, 1, 1]);
+  }
+  finishStep(x, lat, lats, o) {
+    return this.op(
+      finishStep(o),
       [
         x,
-        y,
         this.weights,
-        this.u(UNIFORMS.layernorm, { go: this.half(w), bo: this.half(b) }),
+        lat,
+        lats,
+        this.state,
+        this.u(UNIFORMS.finishStep, {
+          ewo: this.half("eos.w"),
+          ebo: this.half("eos.b"),
+          ngo: this.half("norm.w"),
+          nbo: this.half("norm.b")
+        })
+      ],
+      [1, 1, 1]
+    );
+  }
+  upsample(lats, y, T) {
+    const up = this.q8("up");
+    return this.op(
+      upsample(),
+      [
+        lats,
+        this.weights,
+        y,
+        this.u(UNIFORMS.upsample, { T, wo: up.wo, wso: up.wso, mo: this.half("lat_mean"), so: this.half("lat_std") }),
         this.state
       ],
-      [rows, 1, 1]
+      [T * 512 / 256, 1, 1]
     );
   }
-};
-
-// src/lm.ts
-var H2 = 512;
-var FF = 2048;
-var PROMPT = 125;
-var S_MAX = 1024;
-var F_MAX = 768;
-var TEXT_MAX = 240;
-var PREFILL = [64, 128, 192, 256];
-var BOS = 4294967294;
-var PAD = 4294967295;
-var LN_EPS = "1e-5";
-var FLOW_LN_EPS = "1e-6";
-var ROPE_THETA = "10000.0";
-var EOS_THRESHOLD = "4.0";
-var SPLITS = 8;
-var KV_BYTES = 2;
-function rowBuffers(g, rows) {
-  const r = (n) => g.buffer(rows * n * 4);
-  return { x: r(H2), h: r(H2), qkv: r(3 * H2), q: r(H2), att: r(H2), ff: r(FF) };
-}
-function layerRows(g, pre, o) {
-  const { B, rows, cache } = o;
-  const gate = cache.kind === "codec" ? "chunk" : "none";
-  const at = g.u(UNIFORMS.rows, { rows, pos0: o.pos0 });
-  const kv = [
-    g.layernorm(B.x, B.h, rows, `${pre}.ln1.w`, `${pre}.ln1.b`, LN_EPS, gate),
-    ...g.gemm(B.h, `${pre}.qkv`, B.qkv, { M: rows, K: H2, N: 3 * H2, gate }),
-    g.op(
-      ropeKV({ theta: ROPE_THETA, cache }),
-      [B.qkv, B.q, o.kc, o.vc, g.state, at],
-      [rows, 1, 1]
-    )
-  ];
-  if (o.kvOnly) return kv;
-  return [
-    ...kv,
-    g.op(
-      attention({ cache }),
-      [B.q, o.kc, o.vc, B.att, g.state, at],
-      [Math.ceil(rows / 16), 8, 1]
-    ),
-    ...g.gemm(B.att, `${pre}.o`, B.x, { M: rows, K: H2, N: H2, res: "add", rbuf: B.x, gate }),
-    g.layernorm(B.x, B.h, rows, `${pre}.ln2.w`, `${pre}.ln2.b`, LN_EPS, gate),
-    ...g.gemm(B.h, `${pre}.fc1`, B.ff, { M: rows, K: H2, N: FF, act: "gelu", gate }),
-    ...g.gemm(B.ff, `${pre}.fc2`, o.out?.buf ?? B.x, {
-      M: rows,
-      K: FF,
-      N: H2,
-      res: "add",
-      rbuf: B.x,
-      yo: o.out?.yo ?? 0,
-      gate
-    })
-  ];
-}
-var LanguageModel = class {
-  /** The latents made so far, one row of 32 per frame. */
-  lats;
-  /** One step: a latent, then the next position. */
-  step;
-  /** The alignment head's scores over the text, one row of TEXT_MAX per frame. */
-  align;
-  g;
-  rows;
-  kc;
-  vc;
-  ids;
-  /** The BOS row's output on its way to row 0, where the step's tail reads. */
-  bos;
-  voiceIn;
-  voiceOps;
-  prefills;
-  tail;
-  cond;
-  ada;
-  fh;
-  ft;
-  z;
-  lat;
-  parts;
-  depth;
-  /** The head that follows the text as it speaks (files.ts), its scores kept for word times. */
-  alignLayer;
-  alignAt;
-  constructor(g, depth, align) {
-    this.g = g;
-    this.depth = depth;
-    this.alignLayer = align.layer;
-    this.alignAt = { lo: PROMPT, width: TEXT_MAX, head: align.head };
-    const rows = PREFILL.at(-1);
-    this.rows = rowBuffers(g, rows);
-    this.kc = Array.from({ length: depth }, () => g.buffer(S_MAX * H2 * KV_BYTES));
-    this.vc = Array.from({ length: depth }, () => g.buffer(S_MAX * H2 * KV_BYTES));
-    this.cond = g.buffer(H2 * 4);
-    this.ada = g.buffer(10240 * 4);
-    this.fh = g.buffer(H2 * 4);
-    this.ft = g.buffer(H2 * 4);
-    this.z = g.buffer(32 * 4);
-    this.lat = g.buffer(32 * 4);
-    this.lats = g.buffer(F_MAX * 32 * 4);
-    this.ids = g.buffer(rows * 4);
-    this.bos = g.buffer(H2 * 4);
-    this.parts = g.buffer(SPLITS * 8 * 66 * 4);
-    this.voiceIn = g.buffer(PROMPT * H2 * 4);
-    this.align = g.buffer(F_MAX * TEXT_MAX * 4);
-    this.tail = this.tailOps();
-    this.step = [...Array.from({ length: depth }, (_, i) => this.stepLayer(i)).flat(), ...this.tail];
-    this.voiceOps = [
-      ...g.gemm(this.voiceIn, "prompt_proj", this.rows.x, { M: PROMPT, K: H2, N: H2, gate: "none" }),
-      ...this.layers(PROMPT)
-    ];
-    const em = g.q8("embed");
-    this.prefills = new Map(
-      PREFILL.map((n) => [
-        n,
-        [
-          g.op(
-            embedRows({ bos: BOS, pad: PAD }),
-            [
-              this.ids,
-              g.weights,
-              this.rows.x,
-              g.u(UNIFORMS.embedRows, { eo: em.wo, eso: em.wso, bo: g.half("bos_embed") })
-            ],
-            [n * H2 / 256, 1, 1]
-          ),
-          ...this.layers(n, PROMPT)
-        ]
-      ])
+  shiftRows(stages, T) {
+    return this.op(
+      shiftRows(stages),
+      [...stages.map((st) => st.buf), this.u(UNIFORMS.shiftRows, { T })],
+      [Math.ceil(stages.reduce((n, st) => n + st.ctx * st.ch, 0) / 256), 1, 1]
     );
-  }
-  /** The layers over `rows` rows from position `pos0`, in the prefill's way, and for a text's
-   *  prefill frame 0's alignment row. */
-  layers(rows, pos0 = 0) {
-    const { g } = this;
-    return Array.from({ length: this.depth }, (_, i) => [
-      ...layerRows(g, `l${i}`, {
-        B: this.rows,
-        rows,
-        kc: this.kc[i],
-        vc: this.vc[i],
-        cache: { kind: "lm" },
-        pos0,
-        kvOnly: !pos0 && i === this.depth - 1
-      }),
-      ...pos0 && i === this.alignLayer ? [g.op(alignRow(this.alignAt), [this.rows.q, this.kc[i], this.align, g.state], [1, 1, 1])] : []
-    ]).flat();
-  }
-  /** A voice's prompt rows through every layer, its keys and values kept in a new buffer. */
-  voice(latents) {
-    const { device } = this.g;
-    const bytes = PROMPT * H2 * KV_BYTES;
-    const kv = this.g.buffer(2 * this.depth * bytes);
-    device.queue.writeBuffer(
-      this.voiceIn,
-      0,
-      latents.buffer,
-      latents.byteOffset,
-      latents.byteLength
-    );
-    const enc = device.createCommandEncoder();
-    encode(enc, this.voiceOps);
-    for (let i = 0; i < this.depth; i++) {
-      enc.copyBufferToBuffer(this.kc[i], 0, kv, 2 * i * bytes, bytes);
-      enc.copyBufferToBuffer(this.vc[i], 0, kv, (2 * i + 1) * bytes, bytes);
-    }
-    device.queue.submit([enc.finish()]);
-    return kv;
-  }
-  /** Sets up a text in a voice (its keys and values from `voice`) and encodes its prefill, which
-   *  makes frame 0. The state's position starts on BOS, and frame 0's step moves it past. */
-  start(enc, ids, voice, seed, temperature, framesAfterEos) {
-    const { device } = this.g;
-    const n = PREFILL.find((p) => p > ids.length);
-    const padded = new Uint32Array(n).fill(PAD);
-    padded.set(ids);
-    padded[ids.length] = BOS;
-    device.queue.writeBuffer(this.ids, 0, padded);
-    const state = new Uint32Array(8);
-    state[STATE.pos] = PROMPT + ids.length;
-    state[STATE.after] = framesAfterEos;
-    state[STATE.text] = ids.length;
-    state[STATE.seed] = seed >>> 0;
-    new Float32Array(state.buffer)[STATE.scale] = Math.sqrt(temperature);
-    device.queue.writeBuffer(this.g.state, 0, state);
-    const bytes = PROMPT * H2 * KV_BYTES;
-    for (let i = 0; i < this.depth; i++) {
-      enc.copyBufferToBuffer(voice, 2 * i * bytes, this.kc[i], 0, bytes);
-      enc.copyBufferToBuffer(voice, (2 * i + 1) * bytes, this.vc[i], 0, bytes);
-    }
-    encode(enc, this.prefills.get(n));
-    enc.copyBufferToBuffer(this.rows.x, ids.length * H2 * 4, this.bos, 0, H2 * 4);
-    enc.copyBufferToBuffer(this.bos, 0, this.rows.x, 0, H2 * 4);
-    encode(enc, this.tail);
-  }
-  /** A step's layer: one row at the state's position, attention split over the keys. */
-  stepLayer(i) {
-    const { g } = this;
-    const B = this.rows;
-    const pre = `l${i}`;
-    return [
-      g.gemv(B.x, `${pre}.qkv`, B.qkv, {
-        K: H2,
-        N: 3 * H2,
-        ln: { w: `${pre}.ln1.w`, b: `${pre}.ln1.b`, eps: LN_EPS }
-      }),
-      i === this.alignLayer ? g.op(
-        attnSplit({ splits: SPLITS, theta: ROPE_THETA, sg: g.sg, align: this.alignAt }),
-        [B.qkv, this.kc[i], this.vc[i], this.parts, g.state, this.align],
-        [SPLITS, 8, 1]
-      ) : g.op(
-        attnSplit({ splits: SPLITS, theta: ROPE_THETA, sg: g.sg }),
-        [B.qkv, this.kc[i], this.vc[i], this.parts, g.state],
-        [SPLITS, 8, 1]
-      ),
-      g.gemv(g.zero, `${pre}.o`, B.x, {
-        K: H2,
-        N: H2,
-        res: "add",
-        rbuf: B.x,
-        combine: { splits: SPLITS, parts: this.parts }
-      }),
-      g.gemv(B.x, `${pre}.fc1`, B.ff, {
-        K: H2,
-        N: FF,
-        act: "gelu",
-        ln: { w: `${pre}.ln2.w`, b: `${pre}.ln2.b`, eps: LN_EPS }
-      }),
-      g.gemv(B.ff, `${pre}.fc2`, B.x, { K: FF, N: H2, res: "add", rbuf: B.x })
-    ];
-  }
-  /** From the final hidden state (row 0 of x): the flow head samples the next latent, then its
-   *  EOS logit, the next input row and the next position. */
-  tailOps() {
-    const { g } = this;
-    const x = this.rows.x;
-    const blocks = Array.from({ length: 6 }, (_, i) => {
-      const a = i * 1536;
-      return [
-        g.gemv(this.fh, `fh${i}.fc1.w`, this.ft, {
-          K: H2,
-          N: H2,
-          bias: `fh${i}.fc1.b`,
-          act: "silu",
-          ln: {
-            w: `fh${i}.ln.w`,
-            b: `fh${i}.ln.b`,
-            eps: FLOW_LN_EPS,
-            mod: this.ada,
-            ho: a,
-            so: a + 512
-          }
-        }),
-        g.gemv(this.ft, `fh${i}.fc2.w`, this.fh, {
-          K: H2,
-          N: H2,
-          bias: `fh${i}.fc2.b`,
-          res: "gate",
-          rbuf: this.fh,
-          gbuf: this.ada,
-          go: a + 1024
-        })
-      ];
-    }).flat();
-    const fa = 6 * 1536;
-    return [
-      g.gemv(x, "fh.cond.w", this.cond, {
-        K: H2,
-        N: H2,
-        bias: "fh.cond.b",
-        act: "silu",
-        ln: { w: "norm.w", b: "norm.b", eps: LN_EPS }
-      }),
-      g.gemv(this.cond, "fh.ada.w", this.ada, { K: H2, N: 10240, bias: "fh.ada.b" }),
-      g.op(noise(), [this.z, g.state], [1, 1, 1]),
-      g.gemv(this.z, "fh.in.w", this.fh, { K: 32, N: H2, bias: "fh.in.b" }),
-      ...blocks,
-      g.gemv(this.fh, "fh.out.w", this.lat, {
-        K: H2,
-        N: 32,
-        bias: "fh.out.b",
-        res: "add",
-        rbuf: this.z,
-        ln: { eps: FLOW_LN_EPS, mod: this.ada, ho: fa, so: fa + 512 }
-      }),
-      g.op(
-        finishStep({ eps: LN_EPS, threshold: EOS_THRESHOLD }),
-        [
-          x,
-          g.weights,
-          this.lat,
-          this.lats,
-          g.state,
-          g.u(UNIFORMS.finishStep, {
-            ewo: g.half("eos.w"),
-            ebo: g.half("eos.b"),
-            ngo: g.half("norm.w"),
-            nbo: g.half("norm.b")
-          })
-        ],
-        [1, 1, 1]
-      ),
-      g.gemv(this.lat, "latent_proj", x, { K: 32, N: H2, res: "vec", vname: "cond" })
-    ];
-  }
-};
-
-// src/codec.ts
-var CHUNKS = [1, 2, 4, 8];
-var C_MAX = 8;
-var FRAME2 = 1920;
-var WINDOW = 251;
-var RING = 512;
-var Codec = class {
-  /** The last chunk's samples, up to C_MAX * FRAME floats. */
-  audio;
-  g;
-  ops;
-  stages;
-  constructor(g, lats) {
-    this.g = g;
-    const T = 16 * C_MAX;
-    const stage = (ctx, rate, ch) => ({
-      ctx,
-      rate,
-      ch,
-      buf: g.buffer((ctx + rate * T) * ch * 4)
-    });
-    const tr = stage(6, 1, 512);
-    const s0 = stage(1, 1, 512);
-    const s1 = stage(2, 6, 256);
-    const s1h = stage(0, 6, 128);
-    const s1r = stage(1, 6, 256);
-    const s2 = stage(2, 30, 128);
-    const s2h = stage(0, 30, 64);
-    const s2r = stage(1, 30, 128);
-    const s3 = stage(2, 120, 64);
-    const s3h = stage(0, 120, 32);
-    const s3r = stage(2, 120, 64);
-    this.stages = [tr, s0, s1, s1r, s2, s2r, s3, s3r];
-    this.audio = g.buffer(C_MAX * FRAME2 * 4);
-    const B = rowBuffers(g, T);
-    const rings = [0, 1].map(() => ({ kc: g.buffer(RING * H2 * 4), vc: g.buffer(RING * H2 * 4) }));
-    const gate = "chunk";
-    const opsFor = (C) => {
-      const T2 = 16 * C;
-      const conv = (name, src, dst, o) => {
-        if (src.ctx !== o.k - 1) throw new Error(`${name} reads ${src.ctx} rows of context`);
-        const out = dst instanceof GPUBuffer ? { buf: dst, ctx: 0 } : dst;
-        return g.gemm(src.buf, `${name}.w`, out.buf, {
-          M: src.rate * T2,
-          K: o.k * o.cin,
-          N: o.cout,
-          bias: `${name}.b`,
-          load: "conv",
-          conv: { cin: o.cin, k: o.k, dil: 1, elu: o.elu },
-          res: o.res ? "add" : "none",
-          rbuf: o.res?.buf,
-          ro: o.res ? o.res.ctx * o.cout : 0,
-          yo: out.ctx * o.cout,
-          gate
-        });
-      };
-      const convT = (name, src, dst, o) => g.gemm(src.buf, `${name}.w`, dst.buf, {
-        M: src.rate * T2,
-        K: 2 * o.cin,
-        N: o.cout,
-        bias: `${name}.b`,
-        load: "convT",
-        conv: { cin: o.cin, elu: true, stride: o.s },
-        yo: dst.ctx * o.cout,
-        gate
-      });
-      const up = g.q8("up");
-      return [
-        g.op(
-          upsample(),
-          [
-            lats,
-            g.weights,
-            B.x,
-            g.u(UNIFORMS.upsample, {
-              T: T2,
-              wo: up.wo,
-              wso: up.wso,
-              mo: g.half("lat_mean"),
-              so: g.half("lat_std")
-            }),
-            g.state
-          ],
-          [T2 * 512 / 256, 1, 1]
-        ),
-        ...[0, 1].flatMap(
-          (i) => layerRows(g, `d${i}`, {
-            B,
-            rows: T2,
-            ...rings[i],
-            cache: { kind: "codec", window: WINDOW, ring: RING },
-            pos0: 0,
-            out: i === 1 ? { buf: tr.buf, yo: tr.ctx * 512 } : void 0
-          })
-        ),
-        ...conv("s0", tr, s0, { cin: 512, cout: 512, k: 7, elu: false }),
-        ...convT("s1", s0, s1, { cin: 512, cout: 256, s: 6 }),
-        ...conv("s1r1", s1, s1h, { cin: 256, cout: 128, k: 3, elu: true }),
-        ...conv("s1r2", s1h, s1r, { cin: 128, cout: 256, k: 1, elu: true, res: s1 }),
-        ...convT("s2", s1r, s2, { cin: 256, cout: 128, s: 5 }),
-        ...conv("s2r1", s2, s2h, { cin: 128, cout: 64, k: 3, elu: true }),
-        ...conv("s2r2", s2h, s2r, { cin: 64, cout: 128, k: 1, elu: true, res: s2 }),
-        ...convT("s3", s2r, s3, { cin: 128, cout: 64, s: 4 }),
-        ...conv("s3r1", s3, s3h, { cin: 64, cout: 32, k: 3, elu: true }),
-        ...conv("s3r2", s3h, s3r, { cin: 32, cout: 64, k: 1, elu: true, res: s3 }),
-        ...conv("s4", s3r, this.audio, { cin: 64, cout: 1, k: 3, elu: true }),
-        // Each stage keeps its last rows as the next chunk's left context.
-        g.op(
-          shiftRows(this.stages),
-          [...this.stages.map((st) => st.buf), g.u(UNIFORMS.shiftRows, { T: T2 })],
-          [Math.ceil(this.stages.reduce((n, st) => n + st.ctx * st.ch, 0) / 256), 1, 1]
-        )
-      ];
-    };
-    this.ops = new Map(CHUNKS.map((c) => [c, opsFor(c)]));
-  }
-  /** Before a text's first chunk: no context yet. */
-  reset(enc) {
-    for (const st of this.stages) enc.clearBuffer(st.buf, 0, st.ctx * st.ch * 4);
-  }
-  /** Decodes frames [f0, f0 + size) into `audio`. The position goes to the queue ahead of the
-   *  submit that holds this encoder, so a submit holds one chunk at most. */
-  encodeChunk(enc, f0, size) {
-    this.g.device.queue.writeBuffer(this.g.state, STATE.chunk * 4, new Uint32Array([16 * f0]));
-    encode(enc, this.ops.get(size));
-  }
-};
-
-// src/engine.ts
-var DEPTH = 3;
-var TEMPERATURE = 0.3;
-var FRAMES_AFTER_EOS = 1;
-var FRAMES_AFTER_EOS_SHORT = 3;
-var SHORT_TEXT_WORDS = 4;
-var FRAMES_PER_SECOND = 12.5;
-var COPY_DST2 = 8;
-var MAP_READ = 1;
-var AUDIO_AT = 16;
-var ROWS = Math.max(...CHUNKS);
-var PhononEngine = class {
-  g;
-  model;
-  lm;
-  codec;
-  /** Each voice's prompt keys and values (lm.ts). */
-  voices = /* @__PURE__ */ new Map();
-  stages;
-  rowsAt;
-  pace = Number.NaN;
-  /** Settles when the text in progress has drained. */
-  turn = Promise.resolve();
-  constructor(device, model, { subgroups, align }) {
-    this.model = model;
-    this.g = new Graph(device, model, subgroups);
-    this.lm = new LanguageModel(this.g, lmLayers(model), align);
-    this.codec = new Codec(this.g, this.lm.lats);
-    this.rowsAt = AUDIO_AT + ROWS * FRAME2 * 4;
-    this.stages = Array.from(
-      { length: DEPTH },
-      () => device.createBuffer({ size: this.rowsAt + ROWS * TEXT_MAX * 4, usage: COPY_DST2 | MAP_READ })
-    );
-    this.setPace(0);
-  }
-  /** Settles when every shader has compiled. */
-  ready() {
-    return this.g.ready();
-  }
-  /** Registers a voice by its speaker latents, [125][512]. Its prefill uses the LM's caches, so
-   *  it runs in the queue, before a text (`synthesize`'s `latents`). */
-  addVoice(name, latents) {
-    if (latents.length !== PROMPT * H2)
-      throw new Error(`Voice ${name} has ${latents.length} values`);
-    this.voices.set(name, this.lm.voice(latents));
-  }
-  hasVoice(name) {
-    return this.voices.has(name);
-  }
-  /** The LM's pace (pace.ts): its condition and BOS row are written into the blob, so it is set
-   *  in the queue, before a text (`synthesize`'s `pace`). */
-  setPace(delta) {
-    if (delta === this.pace) return;
-    this.pace = delta;
-    const { cond, bos } = paceVectors(this.model.pace, delta);
-    for (const [name, values] of [
-      ["cond", cond],
-      ["bos_embed", bos]
-    ])
-      this.g.device.queue.writeBuffer(
-        this.g.weights,
-        this.model.tensors[name].offset,
-        toF16(values)
-      );
-  }
-  /** Text ids to 24 kHz audio in one voice, in chunks as they are made, with the alignment
-   *  head's scores of each kept frame over the text as they are made. Null when cancelled. One
-   *  text at a time: a call waits until the one before has drained, cancelled or not. */
-  synthesize(...args) {
-    const next = this.turn.then(() => this.run(...args));
-    this.turn = next.then(() => {
-    }, () => {
-    });
-    return next;
-  }
-  async run(ids, voice, {
-    seed = 1,
-    words = Infinity,
-    pace = 0,
-    latents,
-    cancelled = () => false,
-    onChunk,
-    onRows
-  } = {}) {
-    if (!this.voices.has(voice)) {
-      if (!latents) throw new Error(`Unknown voice ${voice}`);
-      this.addVoice(voice, latents);
-    }
-    const kv = this.voices.get(voice);
-    this.setPace(pace);
-    if (!ids.length) return { chunks: [] };
-    if (ids.length > TEXT_MAX) throw new Error(`Text too long: ${ids.length} tokens`);
-    const { device } = this.g;
-    const { lm, codec } = this;
-    const maxFrames = Math.min(
-      F_MAX,
-      S_MAX - PROMPT - ids.length - 1,
-      Math.ceil((ids.length / 3 + 2) * FRAMES_PER_SECOND)
-    );
-    const after = words <= SHORT_TEXT_WORDS ? FRAMES_AFTER_EOS_SHORT : FRAMES_AFTER_EOS;
-    let enc = device.createCommandEncoder();
-    codec.reset(enc);
-    lm.start(enc, ids, kv, seed, TEMPERATURE, after);
-    device.queue.submit([enc.finish()]);
-    let issued = 1;
-    let decoded = 0;
-    let made = 0;
-    let rowsCopied = 0;
-    let end = null;
-    const chunks = [];
-    const free = [...this.stages];
-    const inflight = [];
-    const issue = () => {
-      const stage = free.pop();
-      enc = device.createCommandEncoder();
-      const size = CHUNKS[Math.min(made, CHUNKS.length - 1)];
-      const target = Math.min(maxFrames, end ?? Math.max(issued, decoded + size));
-      const steps = [];
-      for (; issued < target; issued++) steps.push(...lm.step);
-      if (steps.length) encode(enc, steps);
-      const avail = end ?? issued;
-      let f0 = -1;
-      if (decoded < avail && (decoded + size <= avail || end !== null)) {
-        f0 = decoded;
-        codec.encodeChunk(enc, f0, size);
-        decoded += size;
-        made++;
-      }
-      enc.copyBufferToBuffer(this.g.state, 0, stage, 0, 16);
-      if (f0 >= 0) enc.copyBufferToBuffer(codec.audio, 0, stage, AUDIO_AT, size * FRAME2 * 4);
-      const r0 = rowsCopied;
-      if (issued > r0) {
-        if (issued - r0 > ROWS) throw new Error(`${issued - r0} alignment rows in one submit`);
-        const bytes = TEXT_MAX * 4;
-        enc.copyBufferToBuffer(lm.align, r0 * bytes, stage, this.rowsAt, (issued - r0) * bytes);
-        rowsCopied = issued;
-      }
-      device.queue.submit([enc.finish()]);
-      inflight.push({ stage, f0, size, n: issued, r0, ready: stage.mapAsync(MAP_READ) });
-    };
-    const drain = async () => {
-      const job = inflight.shift();
-      await job.ready;
-      const m = job.stage.getMappedRange();
-      const keep2 = new Uint32Array(m, 0, 4)[STATE.end];
-      if (end === null && keep2) end = Math.min(keep2, maxFrames);
-      if (end === null && job.n >= maxFrames) end = maxFrames;
-      const r1 = Math.min(job.n, end ?? Infinity);
-      if (onRows && r1 > job.r0) {
-        const n = ids.length;
-        const rows = new Float32Array(m, this.rowsAt, (job.n - job.r0) * TEXT_MAX);
-        const out = new Float32Array((r1 - job.r0) * n);
-        for (let r = 0; r < r1 - job.r0; r++) out.set(rows.subarray(r * TEXT_MAX, r * TEXT_MAX + n), r * n);
-        onRows(out);
-      }
-      if (job.f0 >= 0 && (end === null || job.f0 < end)) {
-        const frames = Math.min(job.size, (end ?? Infinity) - job.f0);
-        const chunk = new Float32Array(m, AUDIO_AT, frames * FRAME2).slice();
-        chunks.push(chunk);
-        onChunk?.(chunk);
-      }
-      job.stage.unmap();
-      free.push(job.stage);
-    };
-    const finished = () => end !== null && decoded >= end && issued >= end;
-    for (; ; ) {
-      while (!cancelled() && inflight.length < DEPTH && !finished()) issue();
-      if (!inflight.length) break;
-      await drain();
-    }
-    if (cancelled()) return null;
-    return { chunks };
   }
 };
 
@@ -2007,10 +2133,10 @@ async function cached(url) {
 async function weights(m, progress) {
   const cache = await openCache();
   const hit = await cache?.match(m.weights);
-  if (hit) return unpackModel(await hit.arrayBuffer());
+  if (hit) return hit.arrayBuffer();
   const bytes = await download(m.weights, progress);
   await keep(cache, m.weights, bytes);
-  return unpackModel(bytes.buffer);
+  return bytes.buffer;
 }
 function parts(text, count) {
   if (count(text) <= TEXT_MAX) return [text];
@@ -2035,10 +2161,12 @@ var Phonon = class _Phonon {
   catalog;
   /** Settles when the GPU device is lost (a reset): load again to go on. */
   lost;
+  backend;
   /** The voice `speak` uses when none is given: the default of the model's first language. */
   defaultVoice;
   lag;
-  constructor(engine, tokenizer, catalog, languages, lag, lost) {
+  constructor(engine, tokenizer, catalog, languages, lag, lost, backend) {
+    this.backend = backend;
     this.engine = engine;
     this.tokenizer = tokenizer;
     this.catalog = catalog;
@@ -2046,19 +2174,14 @@ var Phonon = class _Phonon {
     this.lag = lag;
     this.lost = lost;
   }
-  /** Loads a model (files.ts MODELS, Phonon 31M by default): a download the first time, then
-   *  the browser's cache. `progress` hears the download in percent. */
-  static async load({
-    model = "phonon-31m-en",
-    progress
-  } = {}) {
+  /** Loads a model: a download the first time, then the browser's cache. It runs on WebGPU
+   *  when the browser has an adapter, else on the CPU, in a worker. */
+  static async load({ model = "phonon-31m-en", progress, backend = "auto", threads } = {}) {
     const files = MODELS[model];
     const gpu = navigator.gpu;
-    const adapter = await gpu?.requestAdapter({ powerPreference: "high-performance" }).catch(() => null);
-    if (!adapter) throw new Error("This browser has no WebGPU.");
-    const subgroups = subgroups32(adapter);
-    const device = await adapter.requestDevice({ requiredFeatures: subgroups ? ["subgroups"] : [] });
-    const [blob, tokenizer, catalog] = await Promise.all([
+    const adapter = backend === "cpu" ? null : await gpu?.requestAdapter({ powerPreference: "high-performance" }).catch(() => null);
+    if (!adapter && backend === "webgpu") throw new Error("This browser has no WebGPU.");
+    const [packed, tokenizer, catalog] = await Promise.all([
       weights(files, progress ?? (() => {
       })),
       cached(tokenizerUrl(files)).then((b) => new Tokenizer(JSON.parse(new TextDecoder().decode(b)))),
@@ -2073,9 +2196,20 @@ var Phonon = class _Phonon {
         }))
       )
     ]);
-    const engine = new PhononEngine(device, blob, { subgroups, align: files.align });
+    const make = (engine2, lost, b) => new _Phonon(engine2, tokenizer, catalog, files.languages, files.align.lag, lost, b);
+    if (!adapter) {
+      const { CpuEngine: CpuEngine2 } = await Promise.resolve().then(() => (init_remote(), remote_exports));
+      const cores = navigator.hardwareConcurrency || 1;
+      const engine2 = await CpuEngine2.start(packed, files.align, threads ?? Math.min(8, cores));
+      return make(engine2, new Promise(() => {
+      }), { name: "cpu", threads: engine2.threads, simd: engine2.simd });
+    }
+    const subgroups = subgroups32(adapter);
+    const device = await adapter.requestDevice({ requiredFeatures: subgroups ? ["subgroups"] : [] });
+    const unpacked = unpackModel(packed);
+    const engine = new PhononEngine(new GpuGraph(device, unpacked, subgroups), light(unpacked), files.align);
     await engine.ready();
-    return new _Phonon(engine, tokenizer, catalog, files.languages, files.align.lag, device.lost);
+    return make(engine, device.lost, { name: "webgpu" });
   }
   /** The catalog's voices in the model's languages. */
   get voices() {
@@ -2138,6 +2272,10 @@ var Phonon = class _Phonon {
     return { audio: join(audio), sampleRate: SAMPLE_RATE, words, tokens };
   }
 };
+function light(m) {
+  const pace = Object.fromEntries(Object.entries(m.pace).map(([k, v]) => [k, v.slice()]));
+  return { tensors: m.tensors, pace, blob: new Uint8Array() };
+}
 function join(parts2) {
   const out = new Float32Array(parts2.reduce((n, c) => n + c.length, 0));
   let at = 0;

@@ -1,9 +1,13 @@
 # Reference side of the parity check: runs the PyTorch model in Transformers (f32) on each text
 # that parity.mjs spoke, with the engine's own noise (its PCG hash and Box-Muller) in place of
-# torch.randn. With seed 1 it is the same take as the engine's, and with seed 2 a different take,
-# for scale. It compares lengths in frames, log-mel distance and waveform correlation.
-# Usage: python bench/parity.py DIR   (needs torch, transformers from source, safetensors, numpy)
-import glob, json, sys, numpy as np, torch
+# torch.randn. With the clip's seed it is the same take as the engine's, and with the seed + 1000
+# a different take, for scale. It compares lengths in frames, log-mel distance, waveform
+# correlation, and how much of the clip stays in step with the reference: the share of it before
+# the log-mel distance, averaged over half a second, first passes 6 dB. Each DIR is one backend's
+# clips. The reference's clips are kept in DIR/../reference, and the summary of every DIR goes to
+# DIR/../parity-summary.json.
+# Usage: python bench/parity.py DIR [DIR...]   (needs torch, transformers from source, safetensors, numpy)
+import glob, json, os, sys, numpy as np, torch
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
 from transformers import AutoProcessor, GradiumPhononTTSForConditionalGeneration
@@ -62,27 +66,45 @@ def mel_distance(a, b):
     """Mean RMS distance (dB) of 40-band log-mel frames, over the shorter clip, frame by frame."""
     x, y = logmel(a), logmel(b); n = min(len(x), len(y))
     return float(np.sqrt(((x[:n] - y[:n]) ** 2).mean(-1)).mean())
+def in_step(a, b, db=6.0, window=25):
+    """The share of b's log-mel frames before the distance, averaged over `window` frames, first passes `db`."""
+    x, y = logmel(a), logmel(b); n = min(len(x), len(y))
+    d = np.sqrt(((x[:n] - y[:n]) ** 2).mean(-1))
+    run = np.convolve(d, np.ones(window) / window, mode="valid")
+    over = np.nonzero(run > db)[0]
+    return float(over[0] / len(y)) if len(over) else float(n / len(y))
 def correlation(a, b):
     n = min(len(a), len(b)); a, b = a[:n], b[:n]
     x = np.fft.irfft(np.fft.rfft(a, 2 * n) * np.conj(np.fft.rfft(b, 2 * n)))
     near = np.r_[x[:480], x[-480:]]
     return float(near.max() / np.sqrt((a * a).sum() * (b * b).sum()))
 
-rows = []
-for f in sorted(glob.glob(f"{sys.argv[1]}/*.json")):
-    meta = json.load(open(f))
-    ours = np.fromfile(f[:-5] + ".f32", dtype=np.float32)
-    ref = reference(meta["text"], 1)
-    other = reference(meta["text"], 2)
-    rows.append({"id": meta["id"], "refFrames": len(ref) / 1920, "oursFrames": len(ours) / 1920, "otherSeedFrames": len(other) / 1920,
-                 "melDbOursVsRef": mel_distance(ours, ref), "melDbOtherSeedVsRef": mel_distance(other, ref),
-                 "corrOursVsRef": correlation(ours, ref), "corrOtherSeedVsRef": correlation(other, ref)})
-    print(rows[-1], flush=True)
-summary = {"texts": rows,
-           "sameLength": sum(r["refFrames"] == r["oursFrames"] for r in rows),
-           "melDbOursVsRef": float(np.mean([r["melDbOursVsRef"] for r in rows])),
-           "melDbOtherSeedVsRef": float(np.mean([r["melDbOtherSeedVsRef"] for r in rows])),
-           "corrOursVsRef": float(np.mean([r["corrOursVsRef"] for r in rows])),
-           "corrOtherSeedVsRef": float(np.mean([r["corrOtherSeedVsRef"] for r in rows]))}
-json.dump(summary, open(f"{sys.argv[1]}/../parity-summary.json", "w"), indent=1)
-print({k: v for k, v in summary.items() if k != "texts"})
+def cached(dir, id, text, seed):
+    os.makedirs(dir, exist_ok=True)
+    f = f"{dir}/{id}-{seed}.npy"
+    if os.path.exists(f): return np.load(f)
+    a = reference(text, seed); np.save(f, a); return a
+
+if __name__ == "__main__":
+    out = {}
+    for d in sys.argv[1:]:
+        d = d.rstrip("/")
+        refs = os.path.join(os.path.dirname(d) or ".", "reference")
+        rows = []
+        for f in sorted(glob.glob(f"{d}/*.json")):
+            meta = json.load(open(f))
+            seed = meta.get("seed", 1)
+            ours = np.fromfile(f[:-5] + ".f32", dtype=np.float32)
+            ref = cached(refs, meta["id"], meta["text"], seed)
+            other = cached(refs, meta["id"], meta["text"], seed + 1000)
+            rows.append({"id": meta["id"], "seed": seed, "refFrames": len(ref) / 1920, "oursFrames": len(ours) / 1920, "otherSeedFrames": len(other) / 1920,
+                         "melDbOursVsRef": mel_distance(ours, ref), "melDbOtherSeedVsRef": mel_distance(other, ref),
+                         "corrOursVsRef": correlation(ours, ref), "corrOtherSeedVsRef": correlation(other, ref),
+                         "inStepOurs": in_step(ours, ref), "inStepOtherSeed": in_step(other, ref)})
+            print(d, rows[-1], flush=True)
+        mean = lambda k: float(np.mean([r[k] for r in rows]))
+        summary = {"clips": len(rows), "sameLength": sum(r["refFrames"] == r["oursFrames"] for r in rows),
+                   **{k: mean(k) for k in ["melDbOursVsRef", "melDbOtherSeedVsRef", "corrOursVsRef", "corrOtherSeedVsRef", "inStepOurs", "inStepOtherSeed"]}}
+        out[os.path.basename(d)] = {"summary": summary, "clips": rows}
+        print(d, summary, flush=True)
+        json.dump(out, open(os.path.join(os.path.dirname(d) or ".", "parity-summary.json"), "w"), indent=1)

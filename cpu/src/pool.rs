@@ -14,6 +14,7 @@ static THREADS: AtomicU32 = AtomicU32::new(1);
 static SLEEPERS: AtomicU32 = AtomicU32::new(0);
 static SCRATCH: AtomicU32 = AtomicU32::new(0);
 static SCRATCH_PER: AtomicU32 = AtomicU32::new(0);
+static TILE: AtomicU32 = AtomicU32::new(1 << 16 | 4 << 8 | 4);
 /// Spins before a pool thread sleeps: a few milliseconds.
 const SPINS: u32 = 1 << 20;
 
@@ -24,6 +25,29 @@ pub fn scratch_bytes() -> usize {
 
 pub fn scratch(i: usize) -> *mut u8 {
     (SCRATCH.load(Relaxed) as usize + i * scratch_bytes()) as *mut u8
+}
+
+/// A GEMM tile: dot products (rows x 4 or 2 x 8) or broadcasts (rows x 8 or 16), whichever
+/// runs fastest here (cpu.ts times them).
+pub fn tile_shape() -> (bool, usize, usize) {
+    let t = TILE.load(Relaxed) as usize;
+    (t >> 16 != 0, (t >> 8) & 0xff, t & 0xff)
+}
+
+#[no_mangle]
+pub extern "C" fn set_tile(dot: u32, rows: u32, cols: u32) {
+    TILE.store(dot << 16 | rows << 8 | cols, SeqCst);
+}
+
+static GEMV_MODE: AtomicU32 = AtomicU32::new(1);
+/// The GEMV's arithmetic: 0 for f32, 1 for int16 inputs with integer dot products.
+pub fn gemv_mode() -> u32 {
+    GEMV_MODE.load(Relaxed)
+}
+
+#[no_mangle]
+pub extern "C" fn set_gemv(mode: u32) {
+    GEMV_MODE.store(mode, SeqCst);
 }
 
 pub fn threads() -> usize {

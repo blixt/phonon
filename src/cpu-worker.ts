@@ -3,7 +3,8 @@
 // asks (remote.ts). With shared memory it also starts pool workers, more copies of this file,
 // each a thread that takes part of every op.
 import { unpackModel, type PhononModel } from "./checkpoint";
-import { CpuGraph, STACK, type CpuExports } from "./cpu";
+import { CpuGraph, instantiate, simdLevel, STACK, TILES, type CpuExports, type Variant } from "./cpu";
+import { MODEL_CACHE } from "./files";
 import { PhononEngine } from "./engine";
 import type { ToWorker } from "./remote";
 
@@ -12,68 +13,6 @@ const scope = self as unknown as {
   onmessage: ((e: MessageEvent) => void) | null;
   crossOriginIsolated: boolean;
 };
-const PAGE = 65536;
-/** The memory's largest size, in pages: the module allows 1 GiB. */
-const MAX_PAGES = 16384;
-
-/** Modules that validate only with relaxed SIMD (i8x16.relaxed_swizzle), or with SIMD128. */
-const RELAXED = new Uint8Array([
-  0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 15, 1, 13, 0, 65, 0, 253, 15, 65, 0, 253, 15, 253,
-  128, 2, 11,
-]);
-const SIMD = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11]);
-export function simdLevel(): "relaxed" | "simd" | null {
-  if (WebAssembly.validate(RELAXED)) return "relaxed";
-  if (WebAssembly.validate(SIMD)) return "simd";
-  return null;
-}
-
-/** The module with its memory import made unshared, for a page that is not cross-origin
- *  isolated: one flag byte in the import section. */
-function unshare(bytes: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
-  let at = 8;
-  const leb = () => {
-    let v = 0;
-    let shift = 0;
-    for (;;) {
-      const b = bytes[at++];
-      v |= (b & 0x7f) << shift;
-      if (!(b & 0x80)) return v >>> 0;
-      shift += 7;
-    }
-  };
-  while (at < bytes.length) {
-    const id = bytes[at++];
-    const size = leb();
-    const end = at + size;
-    if (id === 2) {
-      const skip = () => {
-        const n = leb();
-        at += n;
-      };
-      for (let n = leb(); n > 0; n--) {
-        skip();
-        skip();
-        const kind = bytes[at++];
-        if (kind === 2) {
-          if (bytes[at] & 2) bytes[at] &= ~2;
-          return bytes;
-        }
-        if (kind === 0) leb();
-        else if (kind === 1) {
-          at++;
-          const flags = bytes[at++];
-          leb();
-          if (flags & 1) leb();
-        } else if (kind === 3) at += 2;
-        else throw new Error("Unexpected import");
-      }
-    }
-    at = end;
-  }
-  return bytes;
-}
-
 interface Pool {
   module: WebAssembly.Module;
   memory: WebAssembly.Memory;
@@ -105,7 +44,21 @@ async function startPool(pool: Pool, url: string, n: number, stacks: number): Pr
   return 1 + count;
 }
 
+/** The fastest GEMM tile on this device, timed on first use and kept in the cache. */
+async function tile(g: CpuGraph, key: string): Promise<Variant["tile"]> {
+  const cache = await caches.open(MODEL_CACHE).catch(() => null);
+  const hit = await cache?.match(key).catch(() => undefined);
+  if (hit) {
+    const known = (await hit.json()) as Variant["tile"];
+    if (TILES.some((t) => JSON.stringify(t) === JSON.stringify(known))) return known;
+  }
+  const best = g.fastestTile();
+  await cache?.put(key, new Response(JSON.stringify(best))).catch(() => {});
+  return best;
+}
+
 let engine: PhononEngine<unknown, unknown> | null = null;
+let graph: CpuGraph | null = null;
 const cancelled = new Set<number>();
 
 async function load(m: Extract<ToWorker, { type: "load" }>) {
@@ -113,27 +66,16 @@ async function load(m: Extract<ToWorker, { type: "load" }>) {
   if (!level) throw new Error("This browser has no WebAssembly SIMD.");
   const shared = scope.crossOriginIsolated && m.threads > 1;
   const url = new URL(`./phonon-cpu-${level}.wasm`, import.meta.url);
-  let bytes: Uint8Array<ArrayBuffer> = new Uint8Array(await (await fetch(url)).arrayBuffer());
-  if (!shared) bytes = unshare(bytes);
-  const module = await WebAssembly.compile(bytes);
   const model = unpackModel(m.packed);
-  const need = Math.ceil((model.blob.byteLength + 96 * 2 ** 20) / PAGE);
-  let memory: WebAssembly.Memory | null = null;
-  for (const maximum of [MAX_PAGES, 8192, 6144, 4096]) {
-    try {
-      memory = new WebAssembly.Memory({ initial: Math.min(need, maximum), maximum, shared } as WebAssembly.MemoryDescriptor);
-      break;
-    } catch {
-      /* a smaller reservation */
-    }
-  }
-  if (!memory) throw new Error("No memory for the CPU engine.");
-  const instance = await WebAssembly.instantiate(module, { env: { memory } });
-  const x = instance.exports as unknown as CpuExports;
+  const wasm = new Uint8Array(await (await fetch(url)).arrayBuffer());
+  const { module, memory, exports: x } = await instantiate(wasm, shared, model.blob.byteLength + 96 * 2 ** 20);
   // Pool threads' stacks first, then everything cpu.ts lays out.
   const base = Math.ceil((x.__heap_base.value as number) / 64) * 64;
   const threads = shared ? await startPool({ module, memory }, import.meta.url, m.threads, base) : 1;
-  const g = new CpuGraph({ ...x, memory }, model, { threads, heap: base + (shared ? m.threads - 1 : 0) * STACK });
+  const g = new CpuGraph(x, model, { threads, heap: base + (shared ? m.threads - 1 : 0) * STACK });
+  // A new build of the module times the tiles again.
+  g.tune({ tile: await tile(g, `${url}?bytes=${wasm.byteLength}&threads=${threads}`), gemv: "int16" });
+  graph = g;
   const light: PhononModel = { tensors: model.tensors, pace: model.pace, blob: new Uint8Array() };
   engine = new PhononEngine(g, light, m.align);
   await engine.ready();
@@ -172,6 +114,10 @@ scope.onmessage = async (e: MessageEvent) => {
         onRows: (rows) => scope.postMessage({ type: "rows", id, rows }, [rows.buffer as ArrayBuffer]),
         onChunk: (samples) => scope.postMessage({ type: "chunk", id, samples }, [samples.buffer as ArrayBuffer]),
       });
+      if (graph?.times.size) {
+        console.log(JSON.stringify([...graph.times].sort((a, b) => b[1] - a[1]).map(([k, v]) => [k, +v.toFixed(2)])));
+        graph.times.clear();
+      }
       scope.postMessage({ type: "done", id, cancelled: !out });
     } catch (err) {
       scope.postMessage({ type: "error", id, message: String((err as Error)?.message ?? err) });

@@ -37,6 +37,12 @@ const RUNTIMES = {
       speak: async (text, first, seed) => (await tts.speak(text, { voice: "Delia", seed, onAudio: first })).audio,
     };
   },
+  async oursCpu() {
+    return oursCpu();
+  },
+  async oursCpu1() {
+    return oursCpu(1);
+  },
   async gradiumWebgpu() {
     return gradium("webgpu");
   },
@@ -63,6 +69,14 @@ const RUNTIMES = {
     };
   },
 };
+async function oursCpu(threads) {
+  const { Phonon } = await import("../dist/phonon.js");
+  const tts = await Phonon.load({ backend: "cpu", threads });
+  return {
+    info: `CPU, ${tts.backend.threads} threads, ${tts.backend.simd}`,
+    speak: async (text, first, seed) => (await tts.speak(text, { voice: "Delia", seed, onAudio: first })).audio,
+  };
+}
 async function gradium(where, model = PHONON) {
   const { PhononTTS } = await import("../node_modules/phonon-tts/index.js");
   // No text normalization: this engine has none, so both do the same work.
