@@ -3,6 +3,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { marked } from "marked";
 import { frames } from "../site/frames";
+import { MODEL_MENU, downloadMb } from "../site/data";
 
 const REPO = "https://github.com/blixt/phonon";
 /** README figures the page draws itself (site/site.ts), or leaves out: the first screen's chart
@@ -60,6 +61,13 @@ const page = readFileSync("site/index.html", "utf8")
   .replace("{{tagline-text}}", text(taglineHtml))
   .replace("{{tagline}}", taglineHtml)
   .replace("{{bars}}", frames.bars())
+  .replace("{{download-mb}}", downloadMb("phonon-31m-en"))
+  .replace(
+    "{{models}}",
+    MODEL_MENU.map(
+      (g) => `<optgroup label="${g.license}">${g.models.map((m) => `<option value="${m.id}">${m.label}</option>`).join("")}</optgroup>`,
+    ).join(""),
+  )
   .replace("{{sections}}", sections.join("\n"));
 writeFileSync("docs/index.html", page);
 console.log(`docs/index.html: ${sections.length} sections`);

@@ -58,8 +58,15 @@ export declare class LanguageModel {
     private readonly z;
     private readonly lat;
     private readonly parts;
-    constructor(g: Graph);
-    /** The 6 layers over `rows` rows from position `pos0`, in the prefill's way, and for a text's
+    private readonly depth;
+    /** The head that follows the text as it speaks (files.ts), its scores kept for word times. */
+    private readonly alignLayer;
+    private readonly alignAt;
+    constructor(g: Graph, depth: number, align: {
+        layer: number;
+        head: number;
+    });
+    /** The layers over `rows` rows from position `pos0`, in the prefill's way, and for a text's
      *  prefill frame 0's alignment row. */
     private layers;
     /** A voice's prompt rows through every layer, its keys and values kept in a new buffer. */

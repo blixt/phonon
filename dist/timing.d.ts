@@ -5,7 +5,9 @@ export interface Span {
     start: number;
     end: number;
 }
-/** Where the head reads in each frame: the mean position near its peak, never moving back. */
+/** Where the head reads in each frame: the mean position near its peak, never moving back.
+ *  Frame 0's row comes from the end-of-text query, which in some models reads the last token:
+ *  it counts no further than frame 1's. */
 export declare function alignPositions(scores: Float32Array, frames: number, n: number): Float32Array;
 /** Token and word spans of one synthesis. `pieces` are its tokens' pieces, a word's first
  *  piece marked with ▁. */

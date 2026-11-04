@@ -25,6 +25,7 @@ export const STATE = { pos: 0, frame: 1, end: 2, chunk: 3, text: 4, after: 5 } a
 export interface Align {
   lo: number;
   width: number;
+  head: number;
 }
 /** Which work returns at once past the end: none, an LM step (its frame) or a codec chunk (its
  *  first frame). */
@@ -746,7 +747,7 @@ export function attnSplit({
   splits: number;
   theta: string;
   sg: boolean;
-  /** Keep head 0's scores over the text, for word times. */
+  /** Keep the alignment head's scores over the text, for word times. */
   align?: Align;
 }): string {
   const pack = (v: string) => `vec2<u32>(pack2x16float(${v}.xy), pack2x16float(${v}.zw))`;
@@ -825,7 +826,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
     ${
       align
         ? `let k = j0 + j - ${align.lo}u;
-    if (h == 0u && j0 + j >= ${align.lo}u && k < st[${TEXT}]) { al[st[${FRAME}] * ${align.width}u + k] = sc[j]; }`
+    if (h == ${align.head}u && j0 + j >= ${align.lo}u && k < st[${TEXT}]) { al[st[${FRAME}] * ${align.width}u + k] = sc[j]; }`
         : ""
     }
     let e = exp(sc[j] - mx); sc[j] = e; sum += e;
@@ -849,9 +850,9 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
 }
 
 
-/** Frame 0's alignment row, in the prefill after the alignment layer's attention: head 0's
- *  scores of the BOS row (the last text row, at the state's position) over the text. */
-export function alignRow({ lo }: Align): string {
+/** Frame 0's alignment row, in the prefill after the alignment layer's attention: the alignment
+ *  head's scores of the BOS row (the last text row, at the state's position) over the text. */
+export function alignRow({ lo, head }: Align): string {
   return `
 @group(0) @binding(0) var<storage, read> qb: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read> kc: array<vec2<u32>>;
@@ -864,7 +865,7 @@ fn main(@builtin(local_invocation_index) li: u32) {
   let m = st[${POS}] - ${lo}u;
   for (var i = li; i < st[${TEXT}]; i += 256u) {
     var d = 0.0;
-    for (var e = 0u; e < 16u; e++) { d += dot(qb[m * 128u + e] * 0.125, kv(kc[(${lo}u + i) * 128u + e])); }
+    for (var e = 0u; e < 16u; e++) { d += dot(qb[m * 128u + ${head * 16}u + e] * 0.125, kv(kc[(${lo}u + i) * 128u + ${head * 16}u + e])); }
     al[i] = d;
   }
 }`;

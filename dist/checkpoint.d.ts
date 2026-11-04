@@ -13,6 +13,8 @@ export interface PhononModel {
     /** What setPace needs: the condition the LM adds for a pace. */
     pace: PaceWeights;
 }
+/** The LM's layers: 6 in Phonon 31M, 9 in the 40M models. */
+export declare const lmLayers: (m: PhononModel) => number;
 /** The safetensors tensors of `buffer`, read as f32. */
 export declare function readSafetensors(buffer: ArrayBuffer): Map<string, {
     shape: number[];

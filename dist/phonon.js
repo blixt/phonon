@@ -704,7 +704,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
   var sum = 0.0;
   for (var j = li; j < cnt; j += 128u) {
     ${align ? `let k = j0 + j - ${align.lo}u;
-    if (h == 0u && j0 + j >= ${align.lo}u && k < st[${TEXT}]) { al[st[${FRAME}] * ${align.width}u + k] = sc[j]; }` : ""}
+    if (h == ${align.head}u && j0 + j >= ${align.lo}u && k < st[${TEXT}]) { al[st[${FRAME}] * ${align.width}u + k] = sc[j]; }` : ""}
     let e = exp(sc[j] - mx); sc[j] = e; sum += e;
   }
   red[li] = sum; workgroupBarrier();
@@ -724,7 +724,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
   if (li == 0u) { part[pb + 64u] = select(mx, -1e30, j1 <= j0); part[pb + 65u] = sum; }
 }`;
 }
-function alignRow({ lo }) {
+function alignRow({ lo, head }) {
   return `
 @group(0) @binding(0) var<storage, read> qb: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read> kc: array<vec2<u32>>;
@@ -737,13 +737,14 @@ fn main(@builtin(local_invocation_index) li: u32) {
   let m = st[${POS}] - ${lo}u;
   for (var i = li; i < st[${TEXT}]; i += 256u) {
     var d = 0.0;
-    for (var e = 0u; e < 16u; e++) { d += dot(qb[m * 128u + e] * 0.125, kv(kc[(${lo}u + i) * 128u + e])); }
+    for (var e = 0u; e < 16u; e++) { d += dot(qb[m * 128u + ${head * 16}u + e] * 0.125, kv(kc[(${lo}u + i) * 128u + ${head * 16}u + e])); }
     al[i] = d;
   }
 }`;
 }
 
 // src/checkpoint.ts
+var lmLayers = (m) => Object.keys(m.tensors).filter((n) => /^l\d+\.qkv$/.test(n)).length;
 function readSafetensors(buffer) {
   const view = new DataView(buffer);
   const headerSize = Number(view.getBigUint64(0, true));
@@ -830,16 +831,37 @@ function readVoice(buffer) {
 }
 
 // src/files.ts
-var PHONON_REPO = "gradium/phonon-31m-en";
-var PHONON_REVISION = "92741c5b07d085ff840e26fea8ce43110b87852f";
+var hubFile = (repo, revision, path) => `https://huggingface.co/${repo}/resolve/${revision}/${path}`;
+var MODEL_CACHE = "phonon-webgpu";
+var FORTY_REPO = "blixt/phonon-40m-webgpu";
+var FORTY_REVISION = "dde41aa27ed6bed7c874621d8b17e77dfece21bf";
+var fortyM = (name, revision, languages, align) => ({
+  source: { repo: `gradium/${name}`, revision },
+  weights: hubFile(FORTY_REPO, FORTY_REVISION, `${name}.int8.bin`),
+  tokenizer: hubFile(FORTY_REPO, FORTY_REVISION, `${name}.tokenizer.5.0.0.json`),
+  languages,
+  license: "CC-BY-NC-4.0",
+  align
+});
+var MODELS = {
+  "phonon-31m-en": {
+    source: { repo: "gradium/phonon-31m-en", revision: "92741c5b07d085ff840e26fea8ce43110b87852f" },
+    weights: hubFile("blixt/phonon-31m-en-webgpu", "f4635a6dddaa6072451e0155c03c97fbe889b6ec", "phonon-31m-en.int8.bin"),
+    tokenizer: "tokenizer.5.0.0.json",
+    languages: ["en"],
+    license: "Apache-2.0",
+    align: { layer: 3, head: 0 }
+  },
+  "phonon-40m-en": fortyM("phonon-40m-en", "bc7e8ae7e543a7a3e4604753e42fbda76ddf0781", ["en"], { layer: 6, head: 0 }),
+  "phonon-40m-fr": fortyM("phonon-40m-fr", "d91086970206b88efd2c88ca971d0628b5968f0f", ["fr"], { layer: 4, head: 1 }),
+  "phonon-40m-de": fortyM("phonon-40m-de", "79cfc7b47fcfc0b666657b981eb366415023a862", ["de"], { layer: 3, head: 5 }),
+  "phonon-40m-es": fortyM("phonon-40m-es", "e5e052b26e31abd5918ade71d3135e69d51a66f8", ["es"], { layer: 4, head: 6 }),
+  "phonon-40m-pt": fortyM("phonon-40m-pt", "4cbfd742a1555d60eb5399c6d296e9f2e07389e9", ["pt"], { layer: 4, head: 2 }),
+  "phonon-40m-multilingual": fortyM("phonon-40m-multilingual", "1537ce46c64f42903e0d608b132ccb073dac46d2", ["en", "fr", "de", "es", "pt"], { layer: 4, head: 1 })
+};
+var tokenizerUrl = (m) => m.tokenizer.startsWith("https:") ? m.tokenizer : hubFile(m.source.repo, m.source.revision, m.tokenizer);
 var VOICES_REPO = "gradium/phonon-voices";
 var VOICES_REVISION = "0ee17205f254b5abc43b266c8a0f215565c352f7";
-var hubFile = (repo, revision, path) => `https://huggingface.co/${repo}/resolve/${revision}/${path}`;
-var WEIGHTS_REPO = "blixt/phonon-31m-en-webgpu";
-var WEIGHTS_REVISION = "f4635a6dddaa6072451e0155c03c97fbe889b6ec";
-var MODEL_CACHE = "phonon-webgpu";
-var WEIGHTS_URL = hubFile(WEIGHTS_REPO, WEIGHTS_REVISION, "phonon-31m-en.int8.bin");
-var TOKENIZER_URL = hubFile(PHONON_REPO, PHONON_REVISION, "tokenizer.5.0.0.json");
 var CATALOG_URL = hubFile(VOICES_REPO, VOICES_REVISION, "voices.jsonl");
 var voiceUrl = (id) => hubFile(VOICES_REPO, VOICES_REVISION, `voices/${id}.safetensors`);
 
@@ -887,11 +909,11 @@ var Graph = class {
   pipes = /* @__PURE__ */ new Map();
   compiling = [];
   scratchBuf = null;
-  constructor(device, model2, sg) {
+  constructor(device, model, sg) {
     this.device = device;
-    this.tensors = model2.tensors;
+    this.tensors = model.tensors;
     this.sg = sg;
-    this.weights = this.buffer(model2.blob.byteLength, model2.blob);
+    this.weights = this.buffer(model.blob.byteLength, model.blob);
     this.state = this.buffer(32);
     this.zero = this.buffer(256);
   }
@@ -1108,8 +1130,6 @@ var FLOW_LN_EPS = "1e-6";
 var ROPE_THETA = "10000.0";
 var EOS_THRESHOLD = "4.0";
 var SPLITS = 8;
-var ALIGN_LAYER = 3;
-var ALIGN = { lo: PROMPT, width: TEXT_MAX };
 var KV_BYTES = 2;
 function rowBuffers(g, rows) {
   const r = (n) => g.buffer(rows * n * 4);
@@ -1173,12 +1193,19 @@ var LanguageModel = class {
   z;
   lat;
   parts;
-  constructor(g) {
+  depth;
+  /** The head that follows the text as it speaks (files.ts), its scores kept for word times. */
+  alignLayer;
+  alignAt;
+  constructor(g, depth, align) {
     this.g = g;
+    this.depth = depth;
+    this.alignLayer = align.layer;
+    this.alignAt = { lo: PROMPT, width: TEXT_MAX, head: align.head };
     const rows = PREFILL.at(-1);
     this.rows = rowBuffers(g, rows);
-    this.kc = Array.from({ length: 6 }, () => g.buffer(S_MAX * H2 * KV_BYTES));
-    this.vc = Array.from({ length: 6 }, () => g.buffer(S_MAX * H2 * KV_BYTES));
+    this.kc = Array.from({ length: depth }, () => g.buffer(S_MAX * H2 * KV_BYTES));
+    this.vc = Array.from({ length: depth }, () => g.buffer(S_MAX * H2 * KV_BYTES));
     this.cond = g.buffer(H2 * 4);
     this.ada = g.buffer(10240 * 4);
     this.fh = g.buffer(H2 * 4);
@@ -1193,7 +1220,7 @@ var LanguageModel = class {
     this.align = g.buffer(F_MAX * TEXT_MAX * 4);
     this.noise = g.u(UNIFORMS.noise, {});
     this.tail = this.tailOps();
-    this.step = [...Array.from({ length: 6 }, (_, i) => this.stepLayer(i)).flat(), ...this.tail];
+    this.step = [...Array.from({ length: depth }, (_, i) => this.stepLayer(i)).flat(), ...this.tail];
     this.voiceOps = [
       ...g.gemm(this.voiceIn, "prompt_proj", this.rows.x, { M: PROMPT, K: H2, N: H2, gate: "none" }),
       ...this.layers(PROMPT, 0)
@@ -1218,11 +1245,11 @@ var LanguageModel = class {
       ])
     );
   }
-  /** The 6 layers over `rows` rows from position `pos0`, in the prefill's way, and for a text's
+  /** The layers over `rows` rows from position `pos0`, in the prefill's way, and for a text's
    *  prefill frame 0's alignment row. */
   layers(rows, pos0, text = false) {
     const { g } = this;
-    return Array.from({ length: 6 }, (_, i) => [
+    return Array.from({ length: this.depth }, (_, i) => [
       ...layerRows(g, `l${i}`, {
         B: this.rows,
         rows,
@@ -1231,14 +1258,14 @@ var LanguageModel = class {
         cache: { kind: "lm" },
         pos0
       }),
-      ...text && i === ALIGN_LAYER ? [g.op(alignRow(ALIGN), [this.rows.q, this.kc[i], this.align, g.state], [1, 1, 1])] : []
+      ...text && i === this.alignLayer ? [g.op(alignRow(this.alignAt), [this.rows.q, this.kc[i], this.align, g.state], [1, 1, 1])] : []
     ]).flat();
   }
   /** A voice's prompt rows through every layer, its keys and values kept in a new buffer. */
   voice(latents) {
     const { device } = this.g;
     const bytes = PROMPT * H2 * KV_BYTES;
-    const kv = this.g.buffer(12 * bytes);
+    const kv = this.g.buffer(2 * this.depth * bytes);
     device.queue.writeBuffer(
       this.voiceIn,
       0,
@@ -1248,7 +1275,7 @@ var LanguageModel = class {
     );
     const enc = device.createCommandEncoder();
     encode(enc, this.voiceOps);
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < this.depth; i++) {
       enc.copyBufferToBuffer(this.kc[i], 0, kv, 2 * i * bytes, bytes);
       enc.copyBufferToBuffer(this.vc[i], 0, kv, (2 * i + 1) * bytes, bytes);
     }
@@ -1274,7 +1301,7 @@ var LanguageModel = class {
     state[STATE.text] = ids.length;
     device.queue.writeBuffer(this.g.state, 0, state);
     const bytes = PROMPT * H2 * KV_BYTES;
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < this.depth; i++) {
       enc.copyBufferToBuffer(voice, 2 * i * bytes, this.kc[i], 0, bytes);
       enc.copyBufferToBuffer(voice, (2 * i + 1) * bytes, this.vc[i], 0, bytes);
     }
@@ -1294,8 +1321,8 @@ var LanguageModel = class {
         N: 3 * H2,
         ln: { w: `${pre}.ln1.w`, b: `${pre}.ln1.b`, eps: LN_EPS }
       }),
-      i === ALIGN_LAYER ? g.op(
-        attnSplit({ splits: SPLITS, theta: ROPE_THETA, sg: g.sg, align: ALIGN }),
+      i === this.alignLayer ? g.op(
+        attnSplit({ splits: SPLITS, theta: ROPE_THETA, sg: g.sg, align: this.alignAt }),
         [B.qkv, this.kc[i], this.vc[i], this.parts, g.state, this.align],
         [SPLITS, 8, 1]
       ) : g.op(
@@ -1547,10 +1574,10 @@ var PhononEngine = class {
   voices = /* @__PURE__ */ new Map();
   stages;
   pace = Number.NaN;
-  constructor(device, model2, { subgroups }) {
-    this.model = model2;
-    this.g = new Graph(device, model2, subgroups);
-    this.lm = new LanguageModel(this.g);
+  constructor(device, model, { subgroups, align }) {
+    this.model = model;
+    this.g = new Graph(device, model, subgroups);
+    this.lm = new LanguageModel(this.g, lmLayers(model), align);
     this.codec = new Codec(this.g, this.lm.lats);
     const most = Math.max(...CHUNKS);
     this.stages = Array.from(
@@ -1688,7 +1715,6 @@ var SILENT_DB = -45;
 var PUNCTUATION = /* @__PURE__ */ new Set([".", ",", "!", "?", ";", ":", ")", '"', "'"]);
 function alignPositions(scores, frames, n) {
   const pos = new Float32Array(frames);
-  let run = 0;
   for (let f = 0; f < frames; f++) {
     const row = scores.subarray(f * n, f * n + n);
     let k = 0;
@@ -1700,9 +1726,10 @@ function alignPositions(scores, frames, n) {
       num += p * i;
       den += p;
     }
-    run = Math.max(run, num / den);
-    pos[f] = run;
+    pos[f] = num / den;
   }
+  if (frames > 1) pos[0] = Math.min(pos[0], pos[1]);
+  for (let f = 1; f < frames; f++) pos[f] = Math.max(pos[f], pos[f - 1]);
   return pos;
 }
 function envelope(pcm) {
@@ -1889,12 +1916,12 @@ async function cached(url) {
   await keep(cache, url, bytes);
   return bytes.buffer;
 }
-async function model(progress) {
+async function weights(m, progress) {
   const cache = await openCache();
-  const hit = await cache?.match(WEIGHTS_URL);
+  const hit = await cache?.match(m.weights);
   if (hit) return unpackModel(await hit.arrayBuffer());
-  const bytes = await download(WEIGHTS_URL, progress);
-  await keep(cache, WEIGHTS_URL, bytes);
+  const bytes = await download(m.weights, progress);
+  await keep(cache, m.weights, bytes);
   return unpackModel(bytes.buffer);
 }
 function parts(text, count) {
@@ -1926,27 +1953,38 @@ var Phonon = class _Phonon {
     this.catalog = catalog;
     this.lost = lost;
   }
-  /** Loads the model: a 43.7 MB download the first time, then the browser's cache.
-   *  `progress` hears the download in percent. */
-  static async load({ progress } = {}) {
+  /** Loads a model (files.ts MODELS, Phonon 31M by default): a download the first time, then
+   *  the browser's cache. `progress` hears the download in percent. */
+  static async load({
+    model = "phonon-31m-en",
+    progress
+  } = {}) {
+    const files = MODELS[model];
     const gpu = navigator.gpu;
     const adapter = await gpu?.requestAdapter({ powerPreference: "high-performance" }).catch(() => null);
     if (!adapter) throw new Error("This browser has no WebGPU.");
     const subgroups = subgroups32(adapter);
     const device = await adapter.requestDevice({ requiredFeatures: subgroups ? ["subgroups"] : [] });
-    const [weights, tokenizer, catalog] = await Promise.all([
-      model(progress ?? (() => {
+    const [blob, tokenizer, catalog] = await Promise.all([
+      weights(files, progress ?? (() => {
       })),
-      cached(TOKENIZER_URL).then((b) => new Tokenizer(JSON.parse(new TextDecoder().decode(b)))),
+      cached(tokenizerUrl(files)).then((b) => new Tokenizer(JSON.parse(new TextDecoder().decode(b)))),
       cached(CATALOG_URL).then(
-        (b) => new TextDecoder().decode(b).split("\n").filter(Boolean).map((line) => JSON.parse(line)).filter((v) => v.language === "en").map((v) => ({ name: v.name, id: v.voice_id, locale: v.locale, gender: v.gender, description: v.description }))
+        (b) => new TextDecoder().decode(b).split("\n").filter(Boolean).map((line) => JSON.parse(line)).filter((v) => files.languages.includes(v.language)).map((v) => ({
+          name: v.name,
+          id: v.voice_id,
+          language: v.language,
+          locale: v.locale,
+          gender: v.gender,
+          description: v.description
+        }))
       )
     ]);
-    const engine = new PhononEngine(device, weights, { subgroups });
+    const engine = new PhononEngine(device, blob, { subgroups, align: files.align });
     await engine.ready();
     return new _Phonon(engine, tokenizer, catalog, device.lost);
   }
-  /** The English voices of the catalog. */
+  /** The catalog's voices in the model's languages. */
   get voices() {
     return this.catalog;
   }
@@ -1996,6 +2034,7 @@ function subgroups32(adapter) {
   return adapter.features.has("subgroups") && info.subgroupMinSize === 32 && info.subgroupMaxSize === 32;
 }
 export {
+  MODELS,
   Phonon,
   TEXT_MAX
 };

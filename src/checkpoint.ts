@@ -1,4 +1,4 @@
-// Gradium's Phonon 31M checkpoint (one safetensors file: the flow LM in bf16,
+// A Gradium Phonon checkpoint (one safetensors file: the flow LM in bf16,
 // the codec's decoder in f32) turned into the engine's weight blob: matrices
 // of Q8_LEAST values or more in int8 with one f16 scale per Q8_GROUP along
 // each row, everything else in f16. Linear
@@ -26,6 +26,8 @@ export interface PhononModel {
   /** What setPace needs: the condition the LM adds for a pace. */
   pace: PaceWeights;
 }
+/** The LM's layers: 6 in Phonon 31M, 9 in the 40M models. */
+export const lmLayers = (m: PhononModel) => Object.keys(m.tensors).filter((n) => /^l\d+\.qkv$/.test(n)).length;
 const H = 512;
 
 /** The safetensors tensors of `buffer`, read as f32. */
@@ -213,7 +215,7 @@ export function convertCheckpoint(buffer: ArrayBuffer): PhononModel {
   put("latent_proj", pace.latentProj);
   put("cond", start.cond);
   put("bos_embed", start.bos);
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; src.has(`flow_lm.transformer.layers.${i}.norm1.weight`); i++) {
     const p = `flow_lm.transformer.layers.${i}.`;
     put(`l${i}.ln1.w`, get(p + "norm1.weight"));
     put(`l${i}.ln1.b`, get(p + "norm1.bias"));

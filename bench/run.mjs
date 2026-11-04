@@ -8,7 +8,7 @@
 // round uses its own seed. Results go to bench/results/NAME.jsonl, and every warm clip of an
 // --audio device to bench/results/audio/NAME/RUNTIME/ID~ROUND.wav.
 // Usage: node bench/run.mjs [--port 7893] [--runs 10] [--first-runs 5] [--kinds first,cold,warm]
-//   [--runtimes ours,gradiumWebgpu,...] [--audio mac]
+//   [--runtimes ours,gradiumWebgpu,...] [--audio mac] [--out bench/results]
 import { appendFileSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { serve } from "./serve.mjs";
@@ -26,7 +26,7 @@ const runtimes = arg("--runtimes", "ours,gradiumWebgpu,gradiumCpu,kokoro").split
 const audioDevices = new Set(arg("--audio", "mac").split(","));
 const { phrases, cold } = JSON.parse(readFileSync(join(here, "phrases.json"), "utf8"));
 const coldPhrase = phrases.filter((p) => p.id === cold);
-const out = join(here, "results");
+const out = arg("--out", join(here, "results"));
 mkdirSync(out, { recursive: true });
 
 /** When each device's page last beat. */

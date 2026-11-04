@@ -18,10 +18,11 @@ export interface Span {
   end: number;
 }
 
-/** Where the head reads in each frame: the mean position near its peak, never moving back. */
+/** Where the head reads in each frame: the mean position near its peak, never moving back.
+ *  Frame 0's row comes from the end-of-text query, which in some models reads the last token:
+ *  it counts no further than frame 1's. */
 export function alignPositions(scores: Float32Array, frames: number, n: number): Float32Array {
   const pos = new Float32Array(frames);
-  let run = 0;
   for (let f = 0; f < frames; f++) {
     const row = scores.subarray(f * n, f * n + n);
     let k = 0;
@@ -33,9 +34,10 @@ export function alignPositions(scores: Float32Array, frames: number, n: number):
       num += p * i;
       den += p;
     }
-    run = Math.max(run, num / den);
-    pos[f] = run;
+    pos[f] = num / den;
   }
+  if (frames > 1) pos[0] = Math.min(pos[0], pos[1]);
+  for (let f = 1; f < frames; f++) pos[f] = Math.max(pos[f], pos[f - 1]);
   return pos;
 }
 

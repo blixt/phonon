@@ -18,6 +18,7 @@ post("/beat", { device }).catch(() => {});
 
 const VOICE_REPO = "https://huggingface.co/gradium/phonon-voices/resolve/0ee17205f254b5abc43b266c8a0f215565c352f7";
 const PHONON = "hf://gradium/phonon-31m-en@92741c5b07d085ff840e26fea8ce43110b87852f";
+const PHONON_MULTILINGUAL = "hf://gradium/phonon-40m-multilingual@1537ce46c64f42903e0d608b132ccb073dac46d2";
 /** Each runtime: load it, and speak a text, calling `first` on its first audio. */
 const RUNTIMES = {
   async ours() {
@@ -28,11 +29,22 @@ const RUNTIMES = {
       speak: async (text, first, seed) => (await tts.speak(text, { voice: "Delia", seed, onAudio: first })).audio,
     };
   },
+  async oursMultilingual() {
+    const { Phonon } = await import("../dist/phonon.js");
+    const tts = await Phonon.load({ model: "phonon-40m-multilingual" });
+    return {
+      info: "WebGPU, int8, 40M multilingual",
+      speak: async (text, first, seed) => (await tts.speak(text, { voice: "Delia", seed, onAudio: first })).audio,
+    };
+  },
   async gradiumWebgpu() {
     return gradium("webgpu");
   },
   async gradiumCpu() {
     return gradium("cpu");
+  },
+  async gradiumWebgpuMultilingual() {
+    return gradium("webgpu", PHONON_MULTILINGUAL);
   },
   async kokoro() {
     const { KokoroTTS } = await import("../node_modules/kokoro-js/dist/kokoro.web.js");
@@ -51,10 +63,10 @@ const RUNTIMES = {
     };
   },
 };
-async function gradium(where) {
+async function gradium(where, model = PHONON) {
   const { PhononTTS } = await import("../node_modules/phonon-tts/index.js");
   // No text normalization: this engine has none, so both do the same work.
-  const tts = await PhononTTS.load({ lang: "none", model: PHONON, device: where, quant: "q8" });
+  const tts = await PhononTTS.load({ lang: "none", model, device: where, quant: "q8" });
   await tts.addVoice("Delia", `${VOICE_REPO}/voices/nGzMHMPAWGaJFHOo.safetensors`);
   return {
     info: `${tts.device}, ${tts.threads} threads (${tts.threadsReason || tts.deviceReason})`,

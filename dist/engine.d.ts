@@ -10,8 +10,12 @@ export declare class PhononEngine {
     private readonly voices;
     private readonly stages;
     private pace;
-    constructor(device: GPUDevice, model: PhononModel, { subgroups }: {
+    constructor(device: GPUDevice, model: PhononModel, { subgroups, align }: {
         subgroups: boolean;
+        align: {
+            layer: number;
+            head: number;
+        };
     });
     /** Settles when every shader has compiled. */
     ready(): Promise<void>;

@@ -2,6 +2,7 @@
 // phrases, and the names and labels the page and its build share.
 import results from "../docs/results.json";
 import phrases from "../bench/phrases.json";
+import type { ModelId } from "../src/files";
 
 export type Stat = { median: number; p25: number; p75: number; n: number } | null;
 export type Metric = "warmRealtime" | "warmFirstMs" | "coldStartMs" | "firstVisitMs";
@@ -23,6 +24,26 @@ const mb = (rt: string) => {
   const s = Object.values(RESULTS).find((d) => d[rt]?.firstVisitMB)?.[rt]?.firstVisitMB;
   return s ? s.median.toFixed(1) : "?";
 };
+
+/** The demo's models, grouped by license, Phonon 31M first. */
+export const MODEL_MENU: { license: string; models: { id: ModelId; label: string }[] }[] = [
+  { license: "Apache 2.0", models: [{ id: "phonon-31m-en", label: "Phonon 31M, English" }] },
+  {
+    license: "CC BY-NC 4.0, non-commercial",
+    models: [
+      { id: "phonon-40m-en", label: "Phonon 40M, English" },
+      { id: "phonon-40m-fr", label: "Phonon 40M, French" },
+      { id: "phonon-40m-de", label: "Phonon 40M, German" },
+      { id: "phonon-40m-es", label: "Phonon 40M, Spanish" },
+      { id: "phonon-40m-pt", label: "Phonon 40M, Portuguese" },
+      { id: "phonon-40m-multilingual", label: "Phonon 40M, 5 languages" },
+    ],
+  },
+];
+/** Megabytes a first visit downloads with a model. The benchmark measured Phonon 31M. The 40M
+ *  models' files are the same size, and the figure is the multilingual model's shorter run
+ *  (bench/results/40m, in the README). */
+export const downloadMb = (id: ModelId) => (id === "phonon-31m-en" ? mb("ours") : "54.3");
 
 export const RUNTIMES = [
   { id: "ours", name: "blixt/phonon", short: "blixt/phonon", note: "WebGPU" },

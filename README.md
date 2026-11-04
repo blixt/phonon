@@ -6,7 +6,7 @@ Fast text-to-speech in the browser, with a start and end time for every word.
 
 ## What it does
 
-blixt/phonon is a WebGPU runtime for [Phonon 31M](https://huggingface.co/gradium/phonon-31m-en), an Apache-2.0 text-to-speech model by [Gradium](https://gradium.ai). Gradium did not make blixt/phonon.
+blixt/phonon is a WebGPU runtime for [Phonon 31M](https://huggingface.co/gradium/phonon-31m-en), an Apache-2.0 text-to-speech model by [Gradium](https://gradium.ai). Gradium did not make blixt/phonon. It also runs Gradium's larger 40M models in English, French, German, Spanish and Portuguese, which are not for commercial use ([Other models](#other-models)).
 
 - It makes 24 kHz English speech in any of Gradium's English voices, and streams the audio as it goes.
 - It returns the start and end time of every word and token.
@@ -14,7 +14,7 @@ blixt/phonon is a WebGPU runtime for [Phonon 31M](https://huggingface.co/gradium
 - It downloads Gradium's weights with the large matrices converted to 8-bit integers (43.7 MB, [on Hugging Face](https://huggingface.co/blixt/phonon-31m-en-webgpu)) and keeps them in the browser's cache.
 - It runs in Chrome on macOS and Windows and in Safari on iOS. Firefox and Android are not tested.
 
-Against Gradium's own browser package, [phonon-tts](https://www.npmjs.com/package/phonon-tts), on WebGPU:
+Against Gradium's own browser package, [phonon-tts](https://www.npmjs.com/package/phonon-tts), on WebGPU, with Phonon 31M:
 
 - Speed: 115× real time against 31× on an M3 Max, 73× against 21× on an RTX 2080 Ti, and 26× against 13× on an iPhone 17 Pro.
 - First audio of a sentence: 3 ms against 15 ms on the M3 Max, and 11 ms against 44 ms on the iPhone.
@@ -77,7 +77,7 @@ import { Phonon } from "phonon-webgpu";
 
 const tts = await Phonon.load({ progress: (percent) => console.log(percent) });
 const speech = await tts.speak("The birch canoe slid on the smooth planks.", {
-  voice: "Delia", // any English voice of Gradium's catalog: tts.voices
+  voice: "Delia", // any voice of Gradium's catalog in the model's languages: tts.voices
   speed: 1,
   onAudio: (samples) => {}, // each chunk, as soon as it exists
 });
@@ -89,6 +89,33 @@ const speech = await tts.speak("The birch canoe slid on the smooth planks.", {
 `Phonon.load` throws when the browser has no WebGPU. The first load downloads 44.3 MB from Hugging Face (the weights, the tokenizer and a voice), and later loads read them from the browser's cache.
 
 The code is in [src](src): [kernels.ts](src/kernels.ts) has the WGSL shaders, [lm.ts](src/lm.ts) the language model, [codec.ts](src/codec.ts) the audio decoder, [engine.ts](src/engine.ts) the loop that drives them and [timing.ts](src/timing.ts) the word times.
+
+## Other models
+
+Gradium also publishes six Phonon 40M models. They have 9 language-model layers where Phonon 31M has 6, and they are under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/), which does not allow commercial use. blixt/phonon runs all of them, from conversions in [blixt/phonon-40m-webgpu](https://huggingface.co/blixt/phonon-40m-webgpu) (53.7 MB each), and the [demo](https://blixt.xyz/phonon/) has them in its model menu.
+
+| Model | Languages | License | First download |
+|---|---|---|--:|
+| `phonon-31m-en` (the default) | English | Apache 2.0 | 44.3 MB |
+| `phonon-40m-en` | English | CC BY-NC 4.0 | 54.3 MB |
+| `phonon-40m-fr`, `phonon-40m-de`, `phonon-40m-es`, `phonon-40m-pt` | French, German, Spanish, Portuguese | CC BY-NC 4.0 | 54.3 MB |
+| `phonon-40m-multilingual` | all five | CC BY-NC 4.0 | 54.3 MB |
+
+Gradium's listeners preferred each one-language model to the multilingual one in its language, and Phonon 31M about as much as the multilingual model in English ([model card](https://huggingface.co/gradium/phonon-40m-multilingual#benchmarks)). A model's voices are the catalog's voices in its languages:
+
+```js
+const tts = await Phonon.load({ model: "phonon-40m-fr" });
+const speech = await tts.speak("Le petit chat dort au soleil près de la fenêtre.", { voice: "Coralie" });
+```
+
+A shorter run of the benchmark on the M3 Max checked Phonon 40M multilingual against phonon-tts with the same model, with the 31M runtimes in the same rounds: 3 rounds of first visits, then 5 rounds of cold runs and 5 rounds of warm runs, on the same English texts in the voice Delia ([bench/results/40m](bench/results/40m)). The three extra layers make each frame cost more, and the other 40M models do the same work:
+
+| Runtime | Model | Speed (× real time) | First audio, warm (ms) | Cold start (ms) | First visit at 50 Mbit/s (s) | Download (MB) |
+|---|---|--:|--:|--:|--:|--:|
+| **blixt/phonon** | 31M | 116 | 2.6 | 43 | 7.2 | 44.3 |
+| **blixt/phonon** | 40M multilingual | 96 | 3.2 | 50 | 8.7 | 54.3 |
+| phonon-tts, WebGPU | 31M | 29 | 19.5 | 345 | 10.9 | 66.8 |
+| phonon-tts, WebGPU | 40M multilingual | 25 | 28.9 | 211 | 12.5 | 76.6 |
 
 ## How it works
 
@@ -112,6 +139,7 @@ The tokenizer must be `tokenizer.5.0.0.json`, not `tokenizer.json`. Only the fir
 - Every tensor with 16,384 values or more becomes int8, with one f16 scale per 32 values along its rows. The scale is max |value| / 127 after rounding the values to f16, and quantized values round half to even. Other tensors stay f16. Shaders read the whole blob as `u32` words and unpack with `unpack4xI8` and `unpack2x16float`, and all arithmetic is f32, which means no shader needs the `shader-f16` feature.
 - On the 110 warm clips per runtime of the benchmark, Whisper large-v3-turbo found no word errors in blixt/phonon's speech (95% interval 0 to 0%), against 0.22% (0 to 0.54%) for phonon-tts on WebGPU. The paired difference is −0.22 points (−0.53 to 0). WavLM speaker embeddings of blixt/phonon's clips are as close to phonon-tts's clips of the same text (cosine 0.988) as phonon-tts's clips are to each other across seeds (0.989). UTMOS predicts 4.40 for both. Nobody has run a listening test.
 - The file is 43.7 MB, against 103 MB for the checkpoint and 64.5 MB for Gradium's GGUF file. `npm run build-weights` rebuilds it byte for byte, and its model card gives the SHA-256.
+- The 40M checkpoints have the same tensors, with 9 language-model layers in place of 6. The converter reads the layer count from the checkpoint. Each file is 53.7 MB, against 122 MB for a checkpoint and 74.6 MB for Gradium's GGUF file. Each model has its own tokenizer, and blixt/phonon's ids match the Python tokenizer's on text in all 5 languages. Whisper large-v3-turbo heard test sentences from each model in its languages as written.
 
 ### Speed
 
@@ -119,8 +147,8 @@ In order of their effect:
 
 1. The whole autoregressive loop stays on the GPU. A 32-byte state buffer holds the position the next step reads, the frame it makes, the end of speech and the codec's position (`STATE` in [kernels.ts](src/kernels.ts)), and each step's last kernel moves it on. The page encodes many steps into one submit without reading anything back. Results come back through mapped staging buffers, up to 3 submits behind the GPU.
 2. One GEMV kernel does every single-row matrix product. 32 lanes work on each output row, each lane loads 16 bytes of weights at a time, and the lanes sum with subgroup operations where every subgroup has exactly 32 lanes (Apple and NVIDIA). Other GPUs use a shared-memory reduction, which is also tested. LayerNorm, with its affine weights and the flow head's adaLN modulation, runs as the GEMV's prologue in one pass (sum and sum of squares). Together with the int8 weights, this GEMV cuts the language model's step from 0.65 ms to 0.30 ms (A/B).
-3. Each voice is prefilled once. A voice is 125 rows of speaker latents. The engine runs them through the 6 layers once and keeps their keys and values (1.5 MB in f16), and each text copies them into the cache and prefills only its own tokens. This cuts first audio from 8.8 ms to 4.9 ms (A/B).
-4. Nothing is allocated per request. All buffers and bind groups exist from the start: about 108 MB, plus 1.5 MB for each voice used. The key/value cache is f16.
+3. Each voice is prefilled once. A voice is 125 rows of speaker latents. The engine runs them through the language model's layers once and keeps their keys and values (1.5 MB in f16 for the 6 layers of Phonon 31M), and each text copies them into the cache and prefills only its own tokens. This cuts first audio from 8.8 ms to 4.9 ms (A/B).
+4. Nothing is allocated per request. All buffers and bind groups exist from the start: about 108 MB with Phonon 31M, plus 1.5 MB for each voice used. The key/value cache is f16.
 5. A step's attention is split over the keys (flash-decoding). 8 workgroups per head each take a share of the keys and leave a partial sum with its maximum, and the output projection's GEMV merges the splits in its prologue, at no extra dispatch. Inside a split, 8 lanes share each key for the scores, and 16 lanes × 8 key groups make the values. This halves a layer's attention, from 30 µs to 15 µs (A/B).
 6. The GPU decides the end of speech. The step's last kernel computes the end-of-speech logit, and when it passes 4.0 the kernel writes how many frames to keep. Every heavy kernel reads that number and returns at once for later frames, which makes the steps a submit runs past the end cost about 2 µs each. On short texts, this raises the speed from 115× to 130× (A/B).
 7. Audio comes out in chunks of 1, 2, 4 and then 8 frames. All chunk sizes share one decoder state: the codec transformer's ring of keys and values (window 251, ring 512 positions at 200 Hz) and each convolution stage's left context. After each chunk, a small kernel moves each stage's last rows to its front, and the convolutions never need a position. The engine clears that context before each text. Chunk size does not change the audio in my tests, though the repository has no test for it.
@@ -129,17 +157,30 @@ In order of their effect:
 10. The codec's convolutions are split-K GEMMs with 64×64 tiles, A and B in shared memory as vec4 along K (16 KB, the portable limit). When a GEMM has few output tiles, K is split to reach about 160 workgroups and a second kernel sums the parts. Row tiles are capped at 4 when choosing the splits, so all text lengths share a few shader variants.
 11. The prefill and the codec transformer use a flash-style attention kernel: 16 query rows share each tile of 16 keys in shared memory, with an online softmax. It gives about 2% (A/B).
 
-An empty dependent dispatch costs about 1.6 µs in Chrome and WebKit on the M3 Max. A step has 48 dispatches (5 for each of the 6 layers, 18 for the flow head and the end of the step), and their barriers and ramps take about a third of its 300 µs.
+An empty dependent dispatch costs about 1.6 µs in Chrome and WebKit on the M3 Max. A Phonon 31M step has 48 dispatches (5 for each of the 6 layers, 18 for the flow head and the end of the step), and their barriers and ramps take about a third of its 300 µs.
 
 ### Word timings
 
 1. Find a head that follows the text. I ran the reference on four texts and recorded each head's attention over the text tokens at every 80 ms frame. Each head got a score: the correlation between the frame number and the token it attends most, times the share of frames that do not move back, times its mean peak attention. Layer 3, head 0 scored 0.78. The next best (layer 3, head 5) scored 0.45, and all others 0.15 or less. Layer 3, head 0 has a correlation of 0.99 or more, never moves back and puts about 80% of its attention on one token.
 2. Record it on the GPU. In every step, the layer 3 attention kernel writes head 0's scores over the text tokens into an alignment buffer, one row per frame. A small extra kernel in the prefill writes frame 0's row from the BOS row's query. After the text ends, the engine reads back the rows of the frames it kept: one small readback per text.
-3. Turn the scores into a position. For each frame, take the token with the highest score and average the token index over the 2 tokens on each side of it, with softmax weights. The position never moves back.
+3. Turn the scores into a position. For each frame, take the token with the highest score and average the token index over the 2 tokens on each side of it, with softmax weights. The position never moves back. Frame 0's position counts no further than frame 1's: frame 0's row comes from the end-of-text query, and in some 40M models that query reads the last token, which would pin every word to the start.
 4. Correct the lead. The head reaches a word about 230 ms (about 3 frames) before the audio does, and the times shift back by 3 frames. After a pause, the head reaches the next word 400 to 570 ms early, because it moves on when the previous word ends. A word start that falls where the audio is quieter than −45 dB (in 10 ms steps) moves to where the sound begins.
 5. Group the tokens into words. A token that starts with ▁ starts a word, unless it is only punctuation.
 
 I chose the 3-frame shift and the −45 dB threshold on 110 words of four other texts. On those words, a 4-frame shift without the silence step was a mean 110 ms from a wav2vec2 forced aligner, and the chosen settings were about 55 ms. The figure above is a held-out check on the 11 benchmark texts in 4 voices (712 words). Word starts are a mean 67 ms and a median 65 ms from the aligner, 76% are within 100 ms, and the 90th percentile is 125 ms. The median signed difference is +40 ms, with the engine later. Only word starts were scored, and the aligner has its own error of a few tens of milliseconds. The "never move back" rule could also hide a repeated or skipped word.
+
+Each 40M model has its own head, and [files.ts](src/files.ts) names it. To find it, the engine spoke 4 other texts in the model's language once with each of the 72 heads (9 layers of 8), with the same shift and threshold. A forced aligner then scored the word starts: [wav2vec2](https://huggingface.co/facebook/wav2vec2-base-960h) in English, and [MMS](https://pytorch.org/audio/stable/generated/torchaudio.pipelines.MMS_FA.html) on romanized text in all five languages. Both aligners scored the multilingual model's English within 2 ms of each other. In each model one head was best by far:
+
+| Model | Head (layer, head) | Search: next best | Held out: mean, median | Within 100 ms |
+|---|---|---|--:|--:|
+| `phonon-40m-en` | 6, 0 | 3, 4 | 65 ms, 66 ms | 79% |
+| `phonon-40m-fr` | 4, 1 | 4, 4 | 42 ms, 32 ms | 93% |
+| `phonon-40m-de` | 3, 5 | 3, 3 | 76 ms, 77 ms | 71% |
+| `phonon-40m-es` | 4, 6 | 4, 4 | 60 ms, 58 ms | 85% |
+| `phonon-40m-pt` | 4, 2 | 4, 5 | 58 ms, 55 ms | 86% |
+| `phonon-40m-multilingual` | 4, 1 | 4, 4 | 35 to 57 ms by language | 84 to 97% |
+
+The held-out check is 6 other texts in 2 voices for each language (106 to 124 words), scored with MMS. The multilingual model's head was chosen on English and held up in all five languages. Phonon 31M's word times are unchanged by the frame 0 rule.
 
 ### Sampling
 
@@ -170,6 +211,7 @@ Speed uses the model's `duration_delta` condition. The engine computes the condi
 - Headless WebKit with an in-memory profile keeps no Cache Storage between workers. Use a profile on disk.
 - Playwright drops the page when a route fulfils a 100 MB body in Chromium. The benchmark redirects to a local server instead.
 - The PC could not reach the Mac over Tailscale (a shared node is one-way). An SSH tunnel carried the page and Chrome's debugging port, and the page loaded as `localhost`, which WebGPU accepts as a secure origin.
+- phonon-tts loads only public Hugging Face repositories in a browser, and Gradium's 40M models are gated. For the 40M run, `HF_LOCAL` in [bench/drive.mjs](bench/drive.mjs) served the model's files from a local download and answered phonon-tts's lookup of the repository as for a public one.
 - Kokoro 82M did not finish on the iPhone. A first visit and a cold run each finished once. After that, Safari either closed the tab on load ("A problem repeatedly occurred") or the page stopped before its first audio. Its fp32 model is 326 MB. The iPhone ran it on its own, after the three Phonon runtimes, because a crashed tab stops the page.
 - On the iPhone, phonon-tts on the CPU ran on 1 thread in 5 of its 21 runs: its worker threads failed to start with "Out of memory", and it went on without them.
 
@@ -203,15 +245,22 @@ node bench/drive.mjs "http://127.0.0.1:7893/bench/?device=mac"   # or open that 
 python bench/plots.py && python bench/table.py      # figures and table
 ```
 
+The 40M run, with Gradium's gated files downloaded to a local folder:
+
+```sh
+node bench/run.mjs --first-runs 3 --runs 5 --runtimes ours,oursMultilingual,gradiumWebgpu,gradiumWebgpuMultilingual --audio none --out bench/results/40m
+HF_LOCAL="gradium/phonon-40m-multilingual=path/to/download" node bench/drive.mjs "http://127.0.0.1:7893/bench/?device=mac"
+```
+
 ## Limits
 
 - The browser must have WebGPU.
-- Only English: blixt/phonon runs the 31M English model, which is Apache-2.0. Gradium's 40M models are CC BY-NC 4.0, and blixt/phonon does not load them.
-- phonon-tts can write out numbers, amounts and symbols as words before it speaks. blixt/phonon cannot, and numbers read best written as words.
+- Only Phonon 31M, in English, is Apache-2.0. The 40M models are under CC BY-NC 4.0: no commercial use.
+- phonon-tts can write out numbers, amounts, dates and symbols as words before it speaks, in each language's own way. blixt/phonon cannot, and numbers read best written as words.
 - The word times follow the model's attention. They are not a forced alignment.
 
 ## Credits and license
 
-The model, its tokenizer and its voices are by [Gradium](https://gradium.ai), under the Apache License 2.0. Phonon builds on [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) and the Mimi codec by [Kyutai](https://kyutai.org). This repository does not include the model. The code downloads Gradium's tokenizer and voices from Hugging Face at pinned revisions, and the converted weights from [blixt/phonon-31m-en-webgpu](https://huggingface.co/blixt/phonon-31m-en-webgpu), which credits Gradium.
+The models, their tokenizers and the voices are by [Gradium](https://gradium.ai). Phonon 31M is under the Apache License 2.0, and the Phonon 40M models under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/). Phonon builds on [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) and the Mimi codec by [Kyutai](https://kyutai.org). This repository does not include a model. The code downloads Gradium's voices from Hugging Face at a pinned revision, and the converted weights from [blixt/phonon-31m-en-webgpu](https://huggingface.co/blixt/phonon-31m-en-webgpu) and [blixt/phonon-40m-webgpu](https://huggingface.co/blixt/phonon-40m-webgpu), which credit Gradium and keep each model's license.
 
 The code in this repository is under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE).

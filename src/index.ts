@@ -1,12 +1,21 @@
-// Phonon 31M in the browser on WebGPU: load the model once, then speak text
-// in any English voice of Gradium's catalog, with the time of every word.
-// The model's files (files.ts) stay in the browser's cache once downloaded.
+// Phonon in the browser on WebGPU: load a model once, then speak text in any
+// voice of Gradium's catalog in the model's languages, with the time of every
+// word. The model's files (files.ts) stay in the browser's cache once downloaded.
 import {
   readVoice,
   unpackModel,
   type PhononModel,
 } from "./checkpoint";
-import { CATALOG_URL, MODEL_CACHE, TOKENIZER_URL, WEIGHTS_URL, voiceUrl } from "./files";
+import {
+  CATALOG_URL,
+  MODEL_CACHE,
+  MODELS,
+  tokenizerUrl,
+  voiceUrl,
+  type Language,
+  type ModelFiles,
+  type ModelId,
+} from "./files";
 import { PhononEngine, TEXT_MAX } from "./engine";
 import { paceForSpeed } from "./pace";
 import { SAMPLE_RATE, spans, type Span } from "./timing";
@@ -64,14 +73,13 @@ async function cached(url: string): Promise<ArrayBuffer> {
   return bytes.buffer;
 }
 
-/** The model in the engine's form, from the cache, or downloaded (reporting progress),
- *  converted and kept in place of the checkpoint. */
-async function model(progress: (percent: number) => void): Promise<PhononModel> {
+/** The model's weights, from the cache, or downloaded (reporting progress) and kept. */
+async function weights(m: ModelFiles, progress: (percent: number) => void): Promise<PhononModel> {
   const cache = await openCache();
-  const hit = await cache?.match(WEIGHTS_URL);
+  const hit = await cache?.match(m.weights);
   if (hit) return unpackModel(await hit.arrayBuffer());
-  const bytes = await download(WEIGHTS_URL, progress);
-  await keep(cache, WEIGHTS_URL, bytes);
+  const bytes = await download(m.weights, progress);
+  await keep(cache, m.weights, bytes);
   return unpackModel(bytes.buffer);
 }
 
@@ -99,6 +107,7 @@ function parts(text: string, count: (s: string) => number): string[] {
 export interface Voice {
   name: string;
   id: string;
+  language: Language;
   locale: string;
   gender: string;
   description: string;
@@ -139,33 +148,44 @@ export class Phonon {
     this.lost = lost;
   }
 
-  /** Loads the model: a 43.7 MB download the first time, then the browser's cache.
-   *  `progress` hears the download in percent. */
-  static async load({ progress }: { progress?: (percent: number) => void } = {}): Promise<Phonon> {
+  /** Loads a model (files.ts MODELS, Phonon 31M by default): a download the first time, then
+   *  the browser's cache. `progress` hears the download in percent. */
+  static async load({
+    model = "phonon-31m-en",
+    progress,
+  }: { model?: ModelId; progress?: (percent: number) => void } = {}): Promise<Phonon> {
+    const files: ModelFiles = MODELS[model];
     const gpu = (navigator as Navigator & { gpu?: GPU }).gpu;
     const adapter = await gpu?.requestAdapter({ powerPreference: "high-performance" }).catch(() => null);
     if (!adapter) throw new Error("This browser has no WebGPU.");
     const subgroups = subgroups32(adapter);
     const device = await adapter.requestDevice({ requiredFeatures: subgroups ? ["subgroups"] : [] });
-    const [weights, tokenizer, catalog] = await Promise.all([
-      model(progress ?? (() => {})),
-      cached(TOKENIZER_URL).then((b) => new Tokenizer(JSON.parse(new TextDecoder().decode(b)))),
+    const [blob, tokenizer, catalog] = await Promise.all([
+      weights(files, progress ?? (() => {})),
+      cached(tokenizerUrl(files)).then((b) => new Tokenizer(JSON.parse(new TextDecoder().decode(b)))),
       cached(CATALOG_URL).then((b) =>
         new TextDecoder()
           .decode(b)
           .split("\n")
           .filter(Boolean)
-          .map((line) => JSON.parse(line) as Voice & { voice_id: string; language: string })
-          .filter((v) => v.language === "en")
-          .map((v) => ({ name: v.name, id: v.voice_id, locale: v.locale, gender: v.gender, description: v.description })),
+          .map((line) => JSON.parse(line) as Voice & { voice_id: string })
+          .filter((v) => files.languages.includes(v.language))
+          .map((v) => ({
+            name: v.name,
+            id: v.voice_id,
+            language: v.language,
+            locale: v.locale,
+            gender: v.gender,
+            description: v.description,
+          })),
       ),
     ]);
-    const engine = new PhononEngine(device, weights, { subgroups });
+    const engine = new PhononEngine(device, blob, { subgroups, align: files.align });
     await engine.ready();
     return new Phonon(engine, tokenizer, catalog, device.lost);
   }
 
-  /** The English voices of the catalog. */
+  /** The catalog's voices in the model's languages. */
   get voices(): readonly Voice[] {
     return this.catalog;
   }
@@ -221,4 +241,5 @@ function subgroups32(adapter: GPUAdapter): boolean {
 }
 
 export { TEXT_MAX } from "./engine";
+export { MODELS, type Language, type ModelId } from "./files";
 export type { Span } from "./timing";

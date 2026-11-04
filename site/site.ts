@@ -1,8 +1,8 @@
 // The web page's script: it draws the charts into the boxes the build wrote (frames.ts), and
 // runs the demo with its live numbers. Nothing here changes a box's size.
-import { Phonon, type Speech } from "../src/index";
-import { MODEL_CACHE, WEIGHTS_URL } from "../src/files";
-import { DEVICES, METRICS, PHRASES, QUALITY, RESULTS, RUNTIMES, TEXTS, TIMING, fmt, ms, short, type Metric, type Stat } from "./data";
+import { Phonon, type Speech, type Voice } from "../src/index";
+import { MODEL_CACHE, MODELS, type Language, type ModelId } from "../src/files";
+import { DEVICES, METRICS, PHRASES, QUALITY, RESULTS, RUNTIMES, TEXTS, TIMING, fmt, ms, short, type Metric, type Stat, downloadMb } from "./data";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const SVG = "http://www.w3.org/2000/svg";
@@ -335,8 +335,33 @@ function listenPlayers(box: HTMLElement) {
 
 // ---- The demo. ----
 
+/** Each language's first voice (outside English, the one UTMOS rated highest with no word errors
+ *  in its 40M model) and sample text: a sample still in the box follows the voice's language. */
+const LANGUAGES: Record<Language, { name: string; voice: string; sample: string }> = {
+  en: { name: "English", voice: "Delia", sample: "The birch canoe slid on the smooth planks. Glue the sheet to the dark blue background." },
+  fr: { name: "French", voice: "Augustin", sample: "Le petit chat dort au soleil près de la fenêtre. Demain, nous irons au marché acheter du pain frais." },
+  de: { name: "German", voice: "Mats", sample: "Der kleine Hund spielt im Garten mit einem roten Ball. Morgen fahren wir mit dem Zug nach Berlin." },
+  es: { name: "Spanish", voice: "Marcos", sample: "El niño camina por la playa al atardecer. Mañana vamos a visitar a mis abuelos en el pueblo." },
+  pt: { name: "Portuguese", voice: "Davi", sample: "O menino corre pelo parque com o seu cachorro. Amanhã vamos viajar para o Rio de Janeiro." },
+};
+/** The model the benchmark measured: only its numbers join the charts. */
+const BENCHMARKED: ModelId = "phonon-31m-en";
+
+/** The voice menu: one group per language when the model has several. */
+function voiceOptions(voices: readonly Voice[], languages: readonly Language[]): HTMLElement[] {
+  const option = (v: Voice) => new Option(v.name, v.name);
+  if (languages.length === 1) return voices.map(option);
+  return languages.map((l) => {
+    const group = document.createElement("optgroup");
+    group.label = LANGUAGES[l].name;
+    group.append(...voices.filter((v) => v.language === l && v.locale !== "characters").map(option));
+    return group;
+  });
+}
+
 async function demo(redrawBars: () => void) {
   const button = $<HTMLButtonElement>("speak");
+
   const words = $("words");
   const speed = $<HTMLInputElement>("speed");
   speed.oninput = () => ($("speed-out").textContent = `${Number(speed.value).toFixed(2).replace(/0$/, "")}×`);
@@ -354,11 +379,25 @@ async function demo(redrawBars: () => void) {
     return;
   }
   const info = adapter.info;
-  $("device").textContent = `GPU: ${[info.vendor, info.architecture].filter(Boolean).join(" ") || "unknown"}`;
+  const gpuName = `GPU: ${[info.vendor, info.architecture].filter(Boolean).join(" ") || "unknown"}`;
+  const text = $<HTMLTextAreaElement>("text");
+  const model = $<HTMLSelectElement>("model");
+  const id = () => model.value as ModelId;
+  /** Stops what is speaking (set once the player below exists). */
+  let stopAll = () => {};
 
+  /** Each model once loaded (or loading), and the one the controls speak with. */
+  const loads = new Map<ModelId, Promise<Phonon>>();
   let tts: Phonon | null = null;
-  let loading: Promise<Phonon> | null = null;
-  let downloaded = false;
+  const language = () => tts?.voices.find((v) => v.name === voice.value)?.language ?? "en";
+  /** Shows the chosen model's state: its download before it loads, then its load time. */
+  const describe = (start?: { ms: number; downloaded: boolean }) => {
+    const m = MODELS[id()];
+    $("device").textContent = m.license === "Apache-2.0" ? gpuName : `${gpuName} · CC BY-NC 4.0, non-commercial`;
+    if (start) set("s-load", ms(start.ms), start.downloaded ? "first visit" : "cold start");
+    else set("s-load", `${downloadMb(id())} MB`, "download");
+  };
+  describe();
   /** A short untimed text in the chosen voice, as the benchmark's warm runs speak first: it
    *  fetches the voice and compiles the pipelines, so later numbers are warm ones. */
   let warm: Promise<number> = Promise.resolve(0);
@@ -369,39 +408,78 @@ async function demo(redrawBars: () => void) {
       await p.speak("Hello there.", { voice: voice.value, onAudio: () => (first ||= performance.now() - t0) }).catch(() => {});
       return first;
     }));
-  const load = () =>
-    (loading ??= (async () => {
+  /** Puts a model's voices in the menu, keeping the chosen voice when the model has it. */
+  /** A sample text still in the box follows the chosen voice's language. */
+  const followLanguage = () => {
+    const samples = Object.values(LANGUAGES).map((l) => l.sample);
+    if (!samples.includes(text.value.trim())) return;
+    text.value = LANGUAGES[language()].sample;
+    words.classList.remove("on");
+  };
+  const showVoices = (p: Phonon) => {
+    const keep = voice.value;
+    voice.replaceChildren(...voiceOptions(p.voices, MODELS[id()].languages));
+    // The chosen voice when the model has it, else the model's first language's voice.
+    voice.value = p.voices.some((v) => v.name === keep) ? keep : LANGUAGES[MODELS[id()].languages[0]].voice;
+    followLanguage();
+  };
+  const load = (which = id()) => {
+    const known = loads.get(which);
+    if (known) return known;
+    const loading = (async () => {
       const t0 = performance.now();
-      set("s-load", "…", "loading");
+      let downloaded = false;
+      if (which === id()) set("s-load", "…", "loading");
       const p = await Phonon.load({
+        model: which,
         progress: (percent) => {
           downloaded = true;
-          set("s-load", `${percent}%`, "of the model");
+          if (which === id()) set("s-load", `${percent}%`, "of the model");
         },
       });
       const loaded = performance.now() - t0;
-      voice.replaceChildren(...p.voices.map((v) => new Option(v.name, v.name)));
-      voice.value = "Delia";
+      if (which !== id()) return p;
+      tts = p;
+      showVoices(p);
       // As the benchmark measures it: load the runtime, then the first audio of a text.
       const start = loaded + (await warmUp(p));
       // A first visit here depends on this connection, and the chart's are at 50 Mbit/s: only a
-      // cold start joins the chart.
-      if (!downloaded) mine.coldStartMs = start;
-      set("s-load", ms(start), downloaded ? "first visit" : "cold start");
+      // cold start of the benchmarked model joins the chart.
+      if (!downloaded && which === BENCHMARKED) mine.coldStartMs = start;
+      if (which === id()) describe({ ms: start, downloaded });
       redrawBars();
-      tts = p;
       Object.assign(globalThis, { phonon: p });
       return p;
     })().catch((error) => {
-      loading = null;
-      set("s-load", "Failed", String(error?.message ?? error));
-      $("s-load").title = String(error?.message ?? error);
+      loads.delete(which);
+      if (which === id()) {
+        set("s-load", "Failed", String(error?.message ?? error));
+        $("s-load").title = String(error?.message ?? error);
+      }
       throw error;
-    }));
-  voice.onchange = () => tts && void warmUp(tts);
+    });
+    loads.set(which, loading);
+    return loading;
+  };
+  voice.onchange = () => {
+    followLanguage();
+    if (tts) void warmUp(tts);
+  };
+  model.onchange = async () => {
+    const chosen = id();
+    stopAll();
+    tts = null;
+    describe();
+    const p = await load().catch(() => null);
+    if (p && chosen === id()) {
+      tts = p;
+      showVoices(p);
+      void warmUp(p);
+    }
+  };
   // With the model in the cache, loading costs no download: start at once.
   const cache = await caches.open(MODEL_CACHE).catch(() => null);
-  if (await cache?.match(WEIGHTS_URL)) void load().catch(() => {});
+  if (await cache?.match(MODELS[id()].weights)) void load().catch(() => {});
 
   let ctx: AudioContext | null = null;
   let sources: AudioBufferSourceNode[] = [];
@@ -445,7 +523,12 @@ async function demo(redrawBars: () => void) {
     abort = null;
     sources = [];
   };
-  const text = $<HTMLTextAreaElement>("text");
+  stopAll = () => {
+    abort?.abort();
+    silence();
+    done();
+    words.classList.remove("on");
+  };
   // Editing the text puts the words away: they belong to the text that was spoken.
   text.onfocus = () => words.classList.remove("on");
   const showWords = (speech: Speech) => {
@@ -521,8 +604,10 @@ async function demo(redrawBars: () => void) {
       $("s-speed").classList.remove("live");
       live();
       last = speech;
-      mine.warmRealtime = made / ((performance.now() - t0) / 1000);
-      mine.warmFirstMs = first;
+      if (id() === BENCHMARKED) {
+        mine.warmRealtime = made / ((performance.now() - t0) / 1000);
+        mine.warmFirstMs = first;
+      }
       redrawBars();
       showWords(speech);
       follow(speech, at - speech.audio.length / 24000);

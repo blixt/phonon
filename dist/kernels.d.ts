@@ -19,6 +19,7 @@ export declare const STATE: {
 export interface Align {
     lo: number;
     width: number;
+    head: number;
 }
 /** Which work returns at once past the end: none, an LM step (its frame) or a codec chunk (its
  *  first frame). */
@@ -160,9 +161,9 @@ export declare function attnSplit({ splits, theta, sg, align, }: {
     splits: number;
     theta: string;
     sg: boolean;
-    /** Keep head 0's scores over the text, for word times. */
+    /** Keep the alignment head's scores over the text, for word times. */
     align?: Align;
 }): string;
-/** Frame 0's alignment row, in the prefill after the alignment layer's attention: head 0's
- *  scores of the BOS row (the last text row, at the state's position) over the text. */
-export declare function alignRow({ lo }: Align): string;
+/** Frame 0's alignment row, in the prefill after the alignment layer's attention: the alignment
+ *  head's scores of the BOS row (the last text row, at the state's position) over the text. */
+export declare function alignRow({ lo, head }: Align): string;

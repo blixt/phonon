@@ -1,4 +1,4 @@
-// Phonon 31M in WebGPU. The LM (lm.ts) makes one 80 ms latent per step with
+// Phonon in WebGPU. The LM (lm.ts) makes one 80 ms latent per step with
 // no round trip to the page, so many steps go out in one submit, and the
 // codec (codec.ts) turns latents into audio in chunks as soon as they exist:
 // small chunks first, for the first sound, then 8 frames at a time. The GPU
@@ -6,7 +6,7 @@
 // Results come back behind the GPU, a few submits deep. A voice is the
 // prompt rows the LM reads first: a catalog voice's speaker latents.
 import { paceVectors } from "./pace";
-import { toF16, type PhononModel } from "./checkpoint";
+import { lmLayers, toF16, type PhononModel } from "./checkpoint";
 import { Graph, encode } from "./graph";
 import { STATE } from "./kernels";
 import { F_MAX, H, LanguageModel, PROMPT, S_MAX, TEXT_MAX } from "./lm";
@@ -37,10 +37,14 @@ export class PhononEngine {
   private readonly stages: GPUBuffer[];
   private pace = Number.NaN;
 
-  constructor(device: GPUDevice, model: PhononModel, { subgroups }: { subgroups: boolean }) {
+  constructor(
+    device: GPUDevice,
+    model: PhononModel,
+    { subgroups, align }: { subgroups: boolean; align: { layer: number; head: number } },
+  ) {
     this.model = model;
     this.g = new Graph(device, model, subgroups);
-    this.lm = new LanguageModel(this.g);
+    this.lm = new LanguageModel(this.g, lmLayers(model), align);
     this.codec = new Codec(this.g, this.lm.lats);
     const most = Math.max(...CHUNKS);
     this.stages = Array.from({ length: DEPTH + 1 }, () =>

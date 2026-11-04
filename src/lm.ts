@@ -1,4 +1,4 @@
-// Phonon's flow LM as ops: a 6-layer transformer over the voice prompt, the
+// Phonon's flow LM as ops: a transformer (6 layers or 9) over the voice prompt, the
 // text and the audio latents, and the flow head that samples each next
 // latent. A voice's 125 prompt rows go through the layers once (`voice`), and
 // a text then copies their keys and values in. The prefill runs the text and
@@ -26,9 +26,6 @@ const FLOW_LN_EPS = "1e-6";
 const ROPE_THETA = "10000.0";
 const EOS_THRESHOLD = "4.0";
 const SPLITS = 8;
-/** The LM's alignment head (layer 3, head 0) follows the text as it speaks: word times. */
-const ALIGN_LAYER = 3;
-const ALIGN: K.Align = { lo: PROMPT, width: TEXT_MAX };
 const KV_BYTES = 2;
 
 /** Per-row activations of a transformer. */
@@ -118,13 +115,20 @@ export class LanguageModel {
   private readonly z: GPUBuffer;
   private readonly lat: GPUBuffer;
   private readonly parts: GPUBuffer;
+  private readonly depth: number;
+  /** The head that follows the text as it speaks (files.ts), its scores kept for word times. */
+  private readonly alignLayer: number;
+  private readonly alignAt: K.Align;
 
-  constructor(g: Graph) {
+  constructor(g: Graph, depth: number, align: { layer: number; head: number }) {
     this.g = g;
+    this.depth = depth;
+    this.alignLayer = align.layer;
+    this.alignAt = { lo: PROMPT, width: TEXT_MAX, head: align.head };
     const rows = PREFILL.at(-1)!;
     this.rows = rowBuffers(g, rows);
-    this.kc = Array.from({ length: 6 }, () => g.buffer(S_MAX * H * KV_BYTES));
-    this.vc = Array.from({ length: 6 }, () => g.buffer(S_MAX * H * KV_BYTES));
+    this.kc = Array.from({ length: depth }, () => g.buffer(S_MAX * H * KV_BYTES));
+    this.vc = Array.from({ length: depth }, () => g.buffer(S_MAX * H * KV_BYTES));
     this.cond = g.buffer(H * 4);
     this.ada = g.buffer(10240 * 4);
     this.fh = g.buffer(H * 4);
@@ -139,7 +143,7 @@ export class LanguageModel {
     this.align = g.buffer(F_MAX * TEXT_MAX * 4);
     this.noise = g.u(K.UNIFORMS.noise, {});
     this.tail = this.tailOps();
-    this.step = [...Array.from({ length: 6 }, (_, i) => this.stepLayer(i)).flat(), ...this.tail];
+    this.step = [...Array.from({ length: depth }, (_, i) => this.stepLayer(i)).flat(), ...this.tail];
     this.voiceOps = [
       ...g.gemm(this.voiceIn, "prompt_proj", this.rows.x, { M: PROMPT, K: H, N: H, gate: "none" }),
       ...this.layers(PROMPT, 0),
@@ -165,11 +169,11 @@ export class LanguageModel {
     );
   }
 
-  /** The 6 layers over `rows` rows from position `pos0`, in the prefill's way, and for a text's
+  /** The layers over `rows` rows from position `pos0`, in the prefill's way, and for a text's
    *  prefill frame 0's alignment row. */
   private layers(rows: number, pos0: number, text = false): Op[] {
     const { g } = this;
-    return Array.from({ length: 6 }, (_, i) => [
+    return Array.from({ length: this.depth }, (_, i) => [
       ...layerRows(g, `l${i}`, {
         B: this.rows,
         rows,
@@ -178,8 +182,8 @@ export class LanguageModel {
         cache: { kind: "lm" },
         pos0,
       }),
-      ...(text && i === ALIGN_LAYER
-        ? [g.op(K.alignRow(ALIGN), [this.rows.q, this.kc[i], this.align, g.state], [1, 1, 1])]
+      ...(text && i === this.alignLayer
+        ? [g.op(K.alignRow(this.alignAt), [this.rows.q, this.kc[i], this.align, g.state], [1, 1, 1])]
         : []),
     ]).flat();
   }
@@ -188,7 +192,7 @@ export class LanguageModel {
   voice(latents: Float32Array): GPUBuffer {
     const { device } = this.g;
     const bytes = PROMPT * H * KV_BYTES;
-    const kv = this.g.buffer(12 * bytes);
+    const kv = this.g.buffer(2 * this.depth * bytes);
     device.queue.writeBuffer(
       this.voiceIn,
       0,
@@ -198,7 +202,7 @@ export class LanguageModel {
     );
     const enc = device.createCommandEncoder();
     encode(enc, this.voiceOps);
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < this.depth; i++) {
       enc.copyBufferToBuffer(this.kc[i], 0, kv, 2 * i * bytes, bytes);
       enc.copyBufferToBuffer(this.vc[i], 0, kv, (2 * i + 1) * bytes, bytes);
     }
@@ -232,7 +236,7 @@ export class LanguageModel {
     state[K.STATE.text] = ids.length;
     device.queue.writeBuffer(this.g.state, 0, state);
     const bytes = PROMPT * H * KV_BYTES;
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < this.depth; i++) {
       enc.copyBufferToBuffer(voice, 2 * i * bytes, this.kc[i], 0, bytes);
       enc.copyBufferToBuffer(voice, (2 * i + 1) * bytes, this.vc[i], 0, bytes);
     }
@@ -255,9 +259,9 @@ export class LanguageModel {
         N: 3 * H,
         ln: { w: `${pre}.ln1.w`, b: `${pre}.ln1.b`, eps: LN_EPS },
       }),
-      i === ALIGN_LAYER
+      i === this.alignLayer
         ? g.op(
-            K.attnSplit({ splits: SPLITS, theta: ROPE_THETA, sg: g.sg, align: ALIGN }),
+            K.attnSplit({ splits: SPLITS, theta: ROPE_THETA, sg: g.sg, align: this.alignAt }),
             [B.qkv, this.kc[i], this.vc[i], this.parts, g.state, this.align],
             [SPLITS, 8, 1],
           )
