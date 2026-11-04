@@ -1,12 +1,20 @@
-// Threads: the engine's thread runs every op, and with N threads each op's work is cut in N
-// parts. Pool threads wait for the next op by spinning on a generation counter, then sleep in
-// memory.atomic.wait once nothing has come for a while. Without shared memory there is one
-// thread and nothing waits.
+// Threads: the engine's thread runs every op, and pool threads join in. Each op's work is in
+// units that threads claim from a counter, in chunks, so a slow or preempted thread holds back
+// no one. Pool threads wait for the next op by spinning on a generation counter, then sleep in
+// memory.atomic.wait once nothing has come for a while. An op waits only for the threads that
+// joined it: once the engine's thread has run out of units it closes the op, and a thread that
+// comes later skips it. Without shared memory there is one thread and nothing waits.
 use core::arch::wasm32::*;
 use core::sync::atomic::{AtomicU32, Ordering::*};
 
 static GEN: AtomicU32 = AtomicU32::new(0);
+/// The next unit of the op in flight that no thread has claimed.
+static NEXT: AtomicU32 = AtomicU32::new(0);
 static DONE: AtomicU32 = AtomicU32::new(0);
+/// The op in flight's generation (high 16 bits), whether it is closed (bit 15), and the pool
+/// threads that joined it.
+static ENTRY: AtomicU32 = AtomicU32::new(0);
+const CLOSED: u32 = 0x8000;
 static JOB: AtomicU32 = AtomicU32::new(0);
 /// Threads taking part in the op in flight.
 static JOB_THREADS: AtomicU32 = AtomicU32::new(1);
@@ -65,6 +73,7 @@ pub extern "C" fn setup(threads: u32, scratch: u32, per: u32) {
 /// Runs `op` on every thread, each with its index, and returns when all are done.
 pub unsafe fn parallel(op: *const u32) {
     let nt = threads();
+    NEXT.store(0, SeqCst);
     if nt == 1 {
         crate::ops::part(op, 0, 1);
         return;
@@ -72,12 +81,29 @@ pub unsafe fn parallel(op: *const u32) {
     JOB.store(op as u32, SeqCst);
     JOB_THREADS.store(nt as u32, SeqCst);
     DONE.store(0, SeqCst);
-    GEN.fetch_add(1, SeqCst);
+    let gen = GEN.load(SeqCst).wrapping_add(1);
+    ENTRY.store(gen << 16, SeqCst);
+    GEN.store(gen, SeqCst);
     if SLEEPERS.load(SeqCst) > 0 {
         memory_atomic_notify(GEN.as_ptr() as *mut i32, u32::MAX);
     }
     crate::ops::part(op, 0, nt);
-    while DONE.load(SeqCst) < (nt - 1) as u32 {}
+    let joined = ENTRY.fetch_or(CLOSED, SeqCst) & 0x7fff;
+    while DONE.load(SeqCst) < joined {}
+}
+
+/// Joins op `gen` unless it is closed or past.
+fn join(gen: u32) -> bool {
+    let mut cur = ENTRY.load(SeqCst);
+    loop {
+        if cur >> 16 != gen & 0xffff || cur & CLOSED != 0 {
+            return false;
+        }
+        match ENTRY.compare_exchange(cur, cur + 1, SeqCst, SeqCst) {
+            Ok(_) => return true,
+            Err(now) => cur = now,
+        }
+    }
 }
 
 /// A pool thread's loop: thread `i` (from 1) takes its part of each op. It never returns.
@@ -103,10 +129,41 @@ pub unsafe extern "C" fn worker(i: u32) {
             }
         }
         let nt = JOB_THREADS.load(SeqCst);
-        if i < nt {
+        if i < nt && join(seen) {
             crate::ops::part(JOB.load(SeqCst) as *const u32, i as usize, nt as usize);
             DONE.fetch_add(1, SeqCst);
         }
+    }
+}
+
+/// The units of an op that this thread takes: chunks of about a quarter of a thread's share,
+/// claimed from a counter, so a slow or preempted thread holds back no one. One loop per op.
+pub fn claimed(total: usize, nt: usize) -> Claimed {
+    let chunk = if nt == 1 { total.max(1) } else { (total / (nt * 4)).max(1) };
+    Claimed { total, chunk, at: 0, end: 0 }
+}
+
+pub struct Claimed {
+    total: usize,
+    chunk: usize,
+    at: usize,
+    end: usize,
+}
+
+impl Iterator for Claimed {
+    type Item = usize;
+    #[inline]
+    fn next(&mut self) -> Option<usize> {
+        if self.at == self.end {
+            let a = NEXT.fetch_add(self.chunk as u32, SeqCst) as usize;
+            if a >= self.total {
+                return None;
+            }
+            self.at = a;
+            self.end = (a + self.chunk).min(self.total);
+        }
+        self.at += 1;
+        Some(self.at - 1)
     }
 }
 

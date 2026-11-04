@@ -4,7 +4,7 @@
 // f64 math.
 use crate::math::*;
 use crate::ops::*;
-use crate::pool::{scratch, share};
+use crate::pool::{claimed, scratch};
 use core::arch::wasm32::*;
 
 /// cos and sin of each of the 32 frequencies at `pos`, into `cs` ([32] cos then [32] sin).
@@ -56,8 +56,7 @@ pub unsafe fn rope(op: *const u32, i: usize, nt: usize) {
     let at = if codec { *st.add(CHUNK) as usize } else { 0 };
     let ring = wu(op, 9);
     let cs = scratch(i) as *mut f32;
-    let (r0, r1) = share(wu(op, 5), i, nt, 1);
-    for m in r0..r1 {
+    for m in claimed(wu(op, 5), nt) {
         let pos = wu(op, 6) + at + m;
         let slot = if codec { pos % ring } else { pos };
         angles(pos, wp(op, 7), wp(op, 11), wu(op, 12), cs);
@@ -150,8 +149,7 @@ pub unsafe fn attention(op: *const u32, i: usize, nt: usize) {
     let (window, ring) = (wu(op, 8), wu(op, 9));
     let base = wu(op, 6) + if codec { *st.add(CHUNK) as usize } else { 0 };
     let sc = scratch(i) as *mut f32;
-    let (t0, t1) = share(wu(op, 5) * 8, i, nt, 1);
-    for t in t0..t1 {
+    for t in claimed(wu(op, 5) * 8, nt) {
         let (m, h) = (t / 8, t % 8);
         let pos = base + m;
         let lo = if window > 0 && pos + 1 > window { pos + 1 - window } else { 0 };
@@ -187,8 +185,7 @@ pub unsafe fn step(op: *const u32, i: usize, nt: usize) {
     let qf = cs.add(64);
     let sc = cs.add(128);
     angles(pos, wp(op, 6), wp(op, 13), wu(op, 14), cs);
-    let (t0, t1) = share(splits * 8, i, nt, 1);
-    for t in t0..t1 {
+    for t in claimed(splits * 8, nt) {
         let (sp, h) = (t / 8, t % 8);
         let hb = h * 64;
         let j0 = sp * per;

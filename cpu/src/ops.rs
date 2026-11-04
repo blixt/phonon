@@ -3,7 +3,7 @@
 // each on every thread. The small ops are here; the matrix products and attention have their
 // own files.
 use crate::math::*;
-use crate::pool::{parallel, scratch, share};
+use crate::pool::{claimed, parallel, scratch};
 use core::arch::wasm32::*;
 
 pub const COPY: u32 = 0;
@@ -114,14 +114,13 @@ pub unsafe fn moments(x: *const f32, eps: f32) -> (f32, f32) {
 }
 
 /// LayerNorm: x, y, rows, w, b, eps, gate, state
-unsafe fn layernorm(op: *const u32, i: usize, nt: usize) {
+unsafe fn layernorm(op: *const u32, _i: usize, nt: usize) {
     if gated(w(op, 7), wp(op, 8)) {
         return;
     }
     let (x, y) = (wp::<f32>(op, 1), wp::<f32>(op, 2));
     let (g, b) = (wp::<u16>(op, 4), wp::<u16>(op, 5));
-    let (r0, r1) = share(wu(op, 3), i, nt, 1);
-    for r in r0..r1 {
+    for r in claimed(wu(op, 3), nt) {
         let (xr, yr) = (x.add(r * 512), y.add(r * 512));
         let (mean, inv) = moments(xr, wf(op, 6));
         let (m, s) = (f32x4_splat(mean), f32x4_splat(inv));
@@ -133,12 +132,11 @@ unsafe fn layernorm(op: *const u32, i: usize, nt: usize) {
 }
 
 /// Embedding rows: ids, x, rows, bos, pad, embed, embed scales, bos_embed
-unsafe fn embed(op: *const u32, i: usize, nt: usize) {
+unsafe fn embed(op: *const u32, _i: usize, nt: usize) {
     let (ids, x) = (wp::<u32>(op, 1), wp::<f32>(op, 2));
     let (bos, pad) = (w(op, 4), w(op, 5));
     let (ew, es, bv) = (wp::<i8>(op, 6), wp::<u16>(op, 7), wp::<u16>(op, 8));
-    let (r0, r1) = share(wu(op, 3), i, nt, 1);
-    for r in r0..r1 {
+    for r in claimed(wu(op, 3), nt) {
         let id = *ids.add(r);
         let xr = x.add(r * 512);
         for c in (0..512).step_by(16) {
@@ -222,9 +220,8 @@ unsafe fn upsample(op: *const u32, i: usize, nt: usize) {
     let (lats, y) = (wp::<f32>(op, 1), wp::<f32>(op, 2));
     let (uw, us, mean, std) = (wp::<i8>(op, 4), wp::<u16>(op, 5), wp::<u16>(op, 6), wp::<u16>(op, 7));
     let chunk = *st.add(CHUNK) as usize;
-    let (t0, t1) = share(wu(op, 3), i, nt, 1);
     let lat = scratch(i) as *mut f32;
-    for tl in t0..t1 {
+    for tl in claimed(wu(op, 3), nt) {
         let t = chunk + tl;
         let (ph, q) = (t % 16, t / 16);
         // The two frames' latents, denormalized (zero before the first frame).
@@ -274,13 +271,13 @@ unsafe fn shift(op: *const u32) {
 }
 
 /// ELU of a stage before a convolution reads it: src, dst, count, gate, state
-unsafe fn elu(op: *const u32, i: usize, nt: usize) {
+unsafe fn elu(op: *const u32, _i: usize, nt: usize) {
     if gated(w(op, 4), wp(op, 5)) {
         return;
     }
     let (src, dst) = (wp::<f32>(op, 1), wp::<f32>(op, 2));
-    let (a, b) = share(wu(op, 3), i, nt, 4);
-    for k in (a..b).step_by(4) {
+    for u in claimed(wu(op, 3) / 4, nt) {
+        let k = 4 * u;
         v128_store(dst.add(k) as *mut v128, elu4(v128_load(src.add(k) as *const v128)));
     }
 }

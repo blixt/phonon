@@ -6,7 +6,7 @@
 // splits, parts, state.
 use crate::math::*;
 use crate::ops::*;
-use crate::pool::{scratch, share};
+use crate::pool::{claimed, scratch};
 use core::arch::wasm32::*;
 
 pub const RES_ADD: u32 = 1;
@@ -23,20 +23,19 @@ pub unsafe fn gemv(op: *const u32, i: usize, nt: usize) {
     let (k, n) = (wu(op, 6), wu(op, 7));
     let xs = scratch(i) as *mut f32;
     prepare(op, xs, k);
-    let (n0, n1) = share(n, i, nt, 4);
     let (w, ws) = (wp::<i8>(op, 3), wp::<u16>(op, 4));
     if crate::pool::gemv_mode() == 1 && k % 128 == 0 {
         // The input in int16, one scale per 32 values, then integer dot products.
         let xq = xs.add(k) as *mut i16;
         let sx = xq.add(k) as *mut f32;
         quantize(xs, k, xq, sx);
-        for row in (n0..n1).step_by(4) {
-            epilogue(op, row, rows_q16(xq, sx, w, ws, k, row));
+        for b in claimed(n / 4, nt) {
+            epilogue(op, 4 * b, rows_q16(xq, sx, w, ws, k, 4 * b));
         }
         return;
     }
-    for row in (n0..n1).step_by(4) {
-        epilogue(op, row, rows4(xs, w, ws, k, row));
+    for b in claimed(n / 4, nt) {
+        epilogue(op, 4 * b, rows4(xs, w, ws, k, 4 * b));
     }
 }
 

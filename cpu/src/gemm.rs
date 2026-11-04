@@ -10,14 +10,13 @@
 // gate, state.
 use crate::math::*;
 use crate::ops::*;
-use crate::pool::{scratch, scratch_bytes, share, tile_shape};
+use crate::pool::{claimed, scratch, scratch_bytes, share, tile_shape};
 use core::arch::wasm32::*;
 
 const LINEAR: u32 = 0;
 const CONVT: u32 = 2;
 
 struct Shape {
-    m: usize,
     k: usize,
     n: usize,
     phases: usize,
@@ -43,7 +42,6 @@ pub unsafe fn gemm(op: *const u32, i: usize, nt: usize) {
     let phases = if convt { wu(op, 16) } else { 1 };
     let cin = wu(op, 15);
     let s = Shape {
-        m,
         k,
         n,
         phases,
@@ -65,13 +63,12 @@ pub unsafe fn gemm(op: *const u32, i: usize, nt: usize) {
     // Rows split too when there are few column blocks, at least 16 rows each.
     let mparts = (4 * nt).div_ceil(units).min(m.div_ceil(16)).max(1);
     let tasks = units * mparts;
-    let (t0, t1) = share(tasks, i, nt, 1);
     let panel = scratch(i) as *mut f32;
     if s.k * nr * 4 > scratch_bytes() {
         return;
     }
     let mut packed = usize::MAX;
-    for t in t0..t1 {
+    for t in claimed(tasks, nt) {
         let (unit, part) = (t / mparts, t % mparts);
         let (ph, nb) = (unit / blocks, unit % blocks);
         if unit != packed {
