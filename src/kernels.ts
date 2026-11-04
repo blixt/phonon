@@ -1,39 +1,13 @@
-// WGSL for the Phonon engine (engine.ts). Activations are f32 rows of
-// channels. The weights are one blob read as plain u32 words: vectors and
-// small matrices are f16 pairs, the large matrices int8 with one f16 scale
-// per Q8_GROUP weights (checkpoint.ts), so no shader needs 16-bit types.
-// Each generator returns the shader for one configuration, so loops and
-// branches on its constants fold away. Every kernel touches all of its
-// bindings (`_ = &x;`) and declares them all, because graph.ts builds each
-// pipeline's layout from those declarations.
-//
-// The state buffer `st` (STATE) is shared by the LM, the codec and the
-// engine. Work past the end of speech returns at once (`Gate`), so a submit
-// that runs ahead of the page costs little.
-
-export type Act = "none" | "gelu" | "silu";
-/** none | add (y = r + acc) | add_y (y += acc) | gate (y = r + g * acc) |
- *  gate_y (y += g * acc) | vec (y = acc + v, v from the blob) */
-export type Residual = "none" | "add" | "add_y" | "gate" | "gate_y" | "vec";
-/** The state buffer's u32 slots: the position the next LM step feeds, the frame it makes, the
- *  frames to keep once the end of speech is seen (0 before), the first 200 Hz position of the
- *  codec's chunk, the text's length in tokens, and the frames to keep after the end-of-speech
- *  frame, then the noise seed and its f32 scale (stored as u32 bits). */
-export const STATE = { pos: 0, frame: 1, end: 2, chunk: 3, text: 4, after: 5, seed: 6, scale: 7 } as const;
-/** Where the alignment head's scores go: one row per frame over the text tokens, which start
- *  at position `lo`, `width` floats per row. */
-export interface Align {
-  lo: number;
-  width: number;
-  head: number;
-}
-/** Which work returns at once past the end: none, an LM step (its frame) or a codec chunk (its
- *  first frame). */
-export type Gate = "none" | "step" | "chunk";
-/** The two transformers' key and value caches: the LM's, f16 at fixed positions, or the
- *  codec's, an f32 ring at the chunk's position over a window, its work gated past the end. */
-export type Cache = { kind: "lm" } | { kind: "codec"; window: number; ring: number };
-/** Each kernel's uniform fields, in order: its WGSL struct and the values graph.ts writes. */
+// WGSL for the WebGPU backend (gpu.ts): one kernel per op of graph.ts. The weights are one blob
+// read as plain u32 words: vectors and small matrices are f16 pairs, the large matrices int8 with
+// one f16 scale per Q8_GROUP weights (checkpoint.ts), so no shader needs 16-bit types. The LM's
+// key and value cache is f16, the codec's f32. Each generator returns the shader for one
+// configuration, so loops and branches on its constants fold away. Every kernel touches all of
+// its bindings (`_ = &x;`) and declares them all, because gpu.ts builds each pipeline's layout
+// from those declarations.
+import { Q8_GROUP, STATE, type Act, type Align, type Cache, type ConvShape, type Gate, type Residual } from "./graph";
+export { STATE };
+/** Each kernel's uniform fields, in order: its WGSL struct and the values gpu.ts writes. */
 export const UNIFORMS = {
   layernorm: ["go", "bo"],
   rows: ["rows", "pos0"],
@@ -50,14 +24,6 @@ export type Fields = readonly string[];
 function struct(fields: Fields, types: Record<string, string> = {}): string {
   const pad = Array.from({ length: (4 - (fields.length % 4)) % 4 }, (_, i) => `p${i}`);
   return `struct P { ${[...fields, ...pad].map((f) => `${f}: ${types[f] ?? "u32"}`).join(", ")} }`;
-}
-export interface ConvShape {
-  cin: number;
-  k?: number;
-  dil?: number;
-  elu?: boolean;
-  /** Transposed convolutions: the stride, one GEMM per output phase. */
-  stride?: number;
 }
 export interface GemmOptions {
   K: number;
@@ -83,8 +49,6 @@ export interface GemvOptions {
   /** 32-lane subgroup sums, else shared memory. */
   sg: boolean;
 }
-/** int8 weights per f16 scale. */
-export const Q8_GROUP = 32;
 
 const { pos: POS, frame: FRAME, end: END, chunk: CHUNK, text: TEXT, after: AFTER, seed: SEED, scale: SCALE } = STATE;
 const GATES: Record<Gate, string> = {

@@ -1,12 +1,10 @@
-// Phonon's flow LM as ops: a transformer (6 layers or 9) over the voice prompt, the
-// text and the audio latents, and the flow head that samples each next
-// latent. A voice's 125 prompt rows go through the layers once (`voice`), and
-// a text then copies their keys and values in. The prefill runs the text and
-// BOS rows padded to a multiple of 64: one fixed op set per size, so a text
-// only writes its ids. A step feeds the position in the state buffer and
-// makes one frame. The KV cache is f16.
-import * as K from "./kernels";
-import { encode, type Graph, type Op } from "./graph";
+// Phonon's flow LM as ops of a backend (graph.ts): a transformer (6 layers or 9) over the voice
+// prompt, the text and the audio latents, and the flow head that samples each next latent. A
+// voice's 125 prompt rows go through the layers once (`voice`), and a text then copies their keys
+// and values in. The prefill runs the text and BOS rows padded to a multiple of 64: one fixed op
+// set per size, so a text only writes its ids. A step feeds the position in the state buffer and
+// makes one frame.
+import { STATE, type Align, type Cache, type Encoder, type Graph } from "./graph";
 
 export const H = 512;
 const FF = 2048;
@@ -26,59 +24,50 @@ const FLOW_LN_EPS = "1e-6";
 const ROPE_THETA = "10000.0";
 const EOS_THRESHOLD = "4.0";
 const SPLITS = 8;
-const KV_BYTES = 2;
 
 /** Per-row activations of a transformer. */
-export interface Rows {
-  x: GPUBuffer;
-  h: GPUBuffer;
-  qkv: GPUBuffer;
-  q: GPUBuffer;
-  att: GPUBuffer;
-  ff: GPUBuffer;
+export interface Rows<B> {
+  x: B;
+  h: B;
+  qkv: B;
+  q: B;
+  att: B;
+  ff: B;
 }
-export function rowBuffers(g: Graph, rows: number): Rows {
+export function rowBuffers<B>(g: Graph<B, unknown>, rows: number): Rows<B> {
   const r = (n: number) => g.buffer(rows * n * 4);
   return { x: r(H), h: r(H), qkv: r(3 * H), q: r(H), att: r(H), ff: r(FF) };
 }
 
 /** One transformer layer over `rows` rows. Row m sits at position pos0 + m, past the cache's
  *  own position (kernels.ts Cache). `out` takes the layer's result in place of `B.x`. */
-export function layerRows(
-  g: Graph,
+export function layerRows<B, O>(
+  g: Graph<B, O>,
   pre: string,
   o: {
-    B: Rows;
+    B: Rows<B>;
     rows: number;
-    kc: GPUBuffer;
-    vc: GPUBuffer;
-    cache: K.Cache;
+    kc: B;
+    vc: B;
+    cache: Cache;
     pos0: number;
     /** A voice's last layer needs only its keys and values. */
     kvOnly?: boolean;
-    out?: { buf: GPUBuffer; yo: number };
+    out?: { buf: B; yo: number };
   },
-): Op[] {
+): O[] {
   const { B, rows, cache } = o;
   const gate = cache.kind === "codec" ? "chunk" : "none";
-  const at = g.u(K.UNIFORMS.rows, { rows, pos0: o.pos0 });
+  const at = { rows, pos0: o.pos0 };
   const kv = [
     g.layernorm(B.x, B.h, rows, `${pre}.ln1.w`, `${pre}.ln1.b`, LN_EPS, gate),
     ...g.gemm(B.h, `${pre}.qkv`, B.qkv, { M: rows, K: H, N: 3 * H, gate }),
-    g.op(
-      K.ropeKV({ theta: ROPE_THETA, cache }),
-      [B.qkv, B.q, o.kc, o.vc, g.state, at],
-      [rows, 1, 1],
-    ),
+    g.ropeKV(B.qkv, B.q, o.kc, o.vc, at, { theta: ROPE_THETA, cache }),
   ];
   if (o.kvOnly) return kv;
   return [
     ...kv,
-    g.op(
-      K.attention({ cache }),
-      [B.q, o.kc, o.vc, B.att, g.state, at],
-      [Math.ceil(rows / 16), 8, 1],
-    ),
+    g.attention(B.q, o.kc, o.vc, B.att, at, { cache }),
     ...g.gemm(B.att, `${pre}.o`, B.x, { M: rows, K: H, N: H, res: "add", rbuf: B.x, gate }),
     g.layernorm(B.x, B.h, rows, `${pre}.ln2.w`, `${pre}.ln2.b`, LN_EPS, gate),
     ...g.gemm(B.h, `${pre}.fc1`, B.ff, { M: rows, K: H, N: FF, act: "gelu", gate }),
@@ -94,45 +83,45 @@ export function layerRows(
   ];
 }
 
-export class LanguageModel {
+export class LanguageModel<B, O> {
   /** The latents made so far, one row of 32 per frame. */
-  readonly lats: GPUBuffer;
+  readonly lats: B;
   /** One step: a latent, then the next position. */
-  readonly step: Op[];
+  readonly step: O[];
   /** The alignment head's scores over the text, one row of TEXT_MAX per frame. */
-  readonly align: GPUBuffer;
-  private readonly g: Graph;
-  private readonly rows: Rows;
-  private readonly kc: GPUBuffer[];
-  private readonly vc: GPUBuffer[];
-  private readonly ids: GPUBuffer;
+  readonly align: B;
+  private readonly g: Graph<B, O>;
+  private readonly rows: Rows<B>;
+  private readonly kc: B[];
+  private readonly vc: B[];
+  private readonly ids: B;
   /** The BOS row's output on its way to row 0, where the step's tail reads. */
-  private readonly bos: GPUBuffer;
-  private readonly voiceIn: GPUBuffer;
-  private readonly voiceOps: Op[];
-  private readonly prefills: Map<number, Op[]>;
-  private readonly tail: Op[];
-  private readonly cond: GPUBuffer;
-  private readonly ada: GPUBuffer;
-  private readonly fh: GPUBuffer;
-  private readonly ft: GPUBuffer;
-  private readonly z: GPUBuffer;
-  private readonly lat: GPUBuffer;
-  private readonly parts: GPUBuffer;
+  private readonly bos: B;
+  private readonly voiceIn: B;
+  private readonly voiceOps: O[];
+  private readonly prefills: Map<number, O[]>;
+  private readonly tail: O[];
+  private readonly cond: B;
+  private readonly ada: B;
+  private readonly fh: B;
+  private readonly ft: B;
+  private readonly z: B;
+  private readonly lat: B;
+  private readonly parts: B;
   private readonly depth: number;
   /** The head that follows the text as it speaks (files.ts), its scores kept for word times. */
   private readonly alignLayer: number;
-  private readonly alignAt: K.Align;
+  private readonly alignAt: Align;
 
-  constructor(g: Graph, depth: number, align: { layer: number; head: number }) {
+  constructor(g: Graph<B, O>, depth: number, align: { layer: number; head: number }) {
     this.g = g;
     this.depth = depth;
     this.alignLayer = align.layer;
     this.alignAt = { lo: PROMPT, width: TEXT_MAX, head: align.head };
     const rows = PREFILL.at(-1)!;
     this.rows = rowBuffers(g, rows);
-    this.kc = Array.from({ length: depth }, () => g.buffer(S_MAX * H * KV_BYTES));
-    this.vc = Array.from({ length: depth }, () => g.buffer(S_MAX * H * KV_BYTES));
+    this.kc = Array.from({ length: depth }, () => g.buffer(S_MAX * H * g.kvBytes));
+    this.vc = Array.from({ length: depth }, () => g.buffer(S_MAX * H * g.kvBytes));
     this.cond = g.buffer(H * 4);
     this.ada = g.buffer(10240 * 4);
     this.fh = g.buffer(H * 4);
@@ -151,30 +140,17 @@ export class LanguageModel {
       ...g.gemm(this.voiceIn, "prompt_proj", this.rows.x, { M: PROMPT, K: H, N: H, gate: "none" }),
       ...this.layers(PROMPT),
     ];
-    const em = g.q8("embed");
     this.prefills = new Map(
       PREFILL.map((n) => [
         n,
-        [
-          g.op(
-            K.embedRows({ bos: BOS, pad: PAD }),
-            [
-              this.ids,
-              g.weights,
-              this.rows.x,
-              g.u(K.UNIFORMS.embedRows, { eo: em.wo, eso: em.wso, bo: g.half("bos_embed") }),
-            ],
-            [(n * H) / 256, 1, 1],
-          ),
-          ...this.layers(n, PROMPT),
-        ],
+        [g.embedRows(this.ids, this.rows.x, n, { bos: BOS, pad: PAD }), ...this.layers(n, PROMPT)],
       ]),
     );
   }
 
   /** The layers over `rows` rows from position `pos0`, in the prefill's way, and for a text's
    *  prefill frame 0's alignment row. */
-  private layers(rows: number, pos0 = 0): Op[] {
+  private layers(rows: number, pos0 = 0): O[] {
     const { g } = this;
     return Array.from({ length: this.depth }, (_, i) => [
       ...layerRows(g, `l${i}`, {
@@ -186,72 +162,64 @@ export class LanguageModel {
         pos0,
         kvOnly: !pos0 && i === this.depth - 1,
       }),
-      ...(pos0 && i === this.alignLayer
-        ? [g.op(K.alignRow(this.alignAt), [this.rows.q, this.kc[i], this.align, g.state], [1, 1, 1])]
-        : []),
+      ...(pos0 && i === this.alignLayer ? [g.alignRow(this.rows.q, this.kc[i], this.align, this.alignAt)] : []),
     ]).flat();
   }
 
   /** A voice's prompt rows through every layer, its keys and values kept in a new buffer. */
-  voice(latents: Float32Array): GPUBuffer {
-    const { device } = this.g;
-    const bytes = PROMPT * H * KV_BYTES;
-    const kv = this.g.buffer(2 * this.depth * bytes);
-    device.queue.writeBuffer(
-      this.voiceIn,
-      0,
-      latents.buffer,
-      latents.byteOffset,
-      latents.byteLength,
-    );
-    const enc = device.createCommandEncoder();
-    encode(enc, this.voiceOps);
+  voice(latents: Float32Array<ArrayBuffer>): B {
+    const { g } = this;
+    const bytes = PROMPT * H * g.kvBytes;
+    const kv = g.buffer(2 * this.depth * bytes);
+    g.write(this.voiceIn, 0, latents);
+    const enc = g.encoder();
+    enc.run(this.voiceOps);
     for (let i = 0; i < this.depth; i++) {
-      enc.copyBufferToBuffer(this.kc[i], 0, kv, 2 * i * bytes, bytes);
-      enc.copyBufferToBuffer(this.vc[i], 0, kv, (2 * i + 1) * bytes, bytes);
+      enc.copy(this.kc[i], 0, kv, 2 * i * bytes, bytes);
+      enc.copy(this.vc[i], 0, kv, (2 * i + 1) * bytes, bytes);
     }
-    device.queue.submit([enc.finish()]);
+    enc.submit();
     return kv;
   }
 
   /** Sets up a text in a voice (its keys and values from `voice`) and encodes its prefill, which
    *  makes frame 0. The state's position starts on BOS, and frame 0's step moves it past. */
   start(
-    enc: GPUCommandEncoder,
+    enc: Encoder<B, O>,
     ids: number[],
-    voice: GPUBuffer,
+    voice: B,
     seed: number,
     temperature: number,
     framesAfterEos: number,
   ) {
-    const { device } = this.g;
+    const { g } = this;
     const n = PREFILL.find((p) => p > ids.length)!;
     const padded = new Uint32Array(n).fill(PAD);
     padded.set(ids);
     padded[ids.length] = BOS;
-    device.queue.writeBuffer(this.ids, 0, padded);
+    g.write(this.ids, 0, padded);
     const state = new Uint32Array(8);
-    state[K.STATE.pos] = PROMPT + ids.length;
-    state[K.STATE.after] = framesAfterEos;
-    state[K.STATE.text] = ids.length;
-    state[K.STATE.seed] = seed >>> 0;
-    new Float32Array(state.buffer)[K.STATE.scale] = Math.sqrt(temperature);
-    device.queue.writeBuffer(this.g.state, 0, state);
-    const bytes = PROMPT * H * KV_BYTES;
+    state[STATE.pos] = PROMPT + ids.length;
+    state[STATE.after] = framesAfterEos;
+    state[STATE.text] = ids.length;
+    state[STATE.seed] = seed >>> 0;
+    new Float32Array(state.buffer)[STATE.scale] = Math.sqrt(temperature);
+    g.write(g.state, 0, state);
+    const bytes = PROMPT * H * g.kvBytes;
     for (let i = 0; i < this.depth; i++) {
-      enc.copyBufferToBuffer(voice, 2 * i * bytes, this.kc[i], 0, bytes);
-      enc.copyBufferToBuffer(voice, (2 * i + 1) * bytes, this.vc[i], 0, bytes);
+      enc.copy(voice, 2 * i * bytes, this.kc[i], 0, bytes);
+      enc.copy(voice, (2 * i + 1) * bytes, this.vc[i], 0, bytes);
     }
     // The rows past BOS are padding: later rows never reach earlier ones, and each step writes
     // its own key and value before it reads the cache, so their keys and values are never read.
-    encode(enc, this.prefills.get(n)!);
-    enc.copyBufferToBuffer(this.rows.x, ids.length * H * 4, this.bos, 0, H * 4);
-    enc.copyBufferToBuffer(this.bos, 0, this.rows.x, 0, H * 4);
-    encode(enc, this.tail);
+    enc.run(this.prefills.get(n)!);
+    enc.copy(this.rows.x, ids.length * H * 4, this.bos, 0, H * 4);
+    enc.copy(this.bos, 0, this.rows.x, 0, H * 4);
+    enc.run(this.tail);
   }
 
   /** A step's layer: one row at the state's position, attention split over the keys. */
-  private stepLayer(i: number): Op[] {
+  private stepLayer(i: number): O[] {
     const { g } = this;
     const B = this.rows;
     const pre = `l${i}`;
@@ -261,18 +229,12 @@ export class LanguageModel {
         N: 3 * H,
         ln: { w: `${pre}.ln1.w`, b: `${pre}.ln1.b`, eps: LN_EPS },
       }),
-      i === this.alignLayer
-        ? g.op(
-            K.attnSplit({ splits: SPLITS, theta: ROPE_THETA, sg: g.sg, align: this.alignAt }),
-            [B.qkv, this.kc[i], this.vc[i], this.parts, g.state, this.align],
-            [SPLITS, 8, 1],
-          )
-        : g.op(
-            K.attnSplit({ splits: SPLITS, theta: ROPE_THETA, sg: g.sg }),
-            [B.qkv, this.kc[i], this.vc[i], this.parts, g.state],
-            [SPLITS, 8, 1],
-          ),
-      g.gemv(g.zero, `${pre}.o`, B.x, {
+      g.attnStep(B.qkv, this.kc[i], this.vc[i], this.parts, {
+        splits: SPLITS,
+        theta: ROPE_THETA,
+        align: i === this.alignLayer ? { at: this.alignAt, buf: this.align } : undefined,
+      }),
+      g.gemv(null, `${pre}.o`, B.x, {
         K: H,
         N: H,
         res: "add",
@@ -291,7 +253,7 @@ export class LanguageModel {
 
   /** From the final hidden state (row 0 of x): the flow head samples the next latent, then its
    *  EOS logit, the next input row and the next position. */
-  private tailOps(): Op[] {
+  private tailOps(): O[] {
     const { g } = this;
     const x = this.rows.x;
     const blocks = Array.from({ length: 6 }, (_, i) => {
@@ -332,7 +294,7 @@ export class LanguageModel {
         ln: { w: "norm.w", b: "norm.b", eps: LN_EPS },
       }),
       g.gemv(this.cond, "fh.ada.w", this.ada, { K: H, N: 10240, bias: "fh.ada.b" }),
-      g.op(K.noise(), [this.z, g.state], [1, 1, 1]),
+      g.noise(this.z),
       g.gemv(this.z, "fh.in.w", this.fh, { K: 32, N: H, bias: "fh.in.b" }),
       ...blocks,
       g.gemv(this.fh, "fh.out.w", this.lat, {
@@ -343,23 +305,7 @@ export class LanguageModel {
         rbuf: this.z,
         ln: { eps: FLOW_LN_EPS, mod: this.ada, ho: fa, so: fa + 512 },
       }),
-      g.op(
-        K.finishStep({ eps: LN_EPS, threshold: EOS_THRESHOLD }),
-        [
-          x,
-          g.weights,
-          this.lat,
-          this.lats,
-          g.state,
-          g.u(K.UNIFORMS.finishStep, {
-            ewo: g.half("eos.w"),
-            ebo: g.half("eos.b"),
-            ngo: g.half("norm.w"),
-            nbo: g.half("norm.b"),
-          }),
-        ],
-        [1, 1, 1],
-      ),
+      g.finishStep(x, this.lat, this.lats, { eps: LN_EPS, threshold: EOS_THRESHOLD }),
       g.gemv(this.lat, "latent_proj", x, { K: 32, N: H, res: "vec", vname: "cond" }),
     ];
   }

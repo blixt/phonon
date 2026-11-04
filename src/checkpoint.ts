@@ -8,7 +8,7 @@
 // pairs to halves, as the kernels rotate. Constants the flow head adds every
 // step (its time embedding for one LSD step from 0 to 1) are computed here.
 import { paceVectors, type PaceWeights } from "./pace";
-import { Q8_GROUP } from "./kernels";
+import { Q8_GROUP } from "./graph";
 
 export interface Tensor {
   /** Byte offset of its values: f16, or int8 when it has scales. */
@@ -59,7 +59,7 @@ export function readSafetensors(
 }
 
 /** f32 to f16 bits, rounding to nearest even. */
-export function toF16(values: Float32Array): Uint16Array {
+export function toF16(values: Float32Array): Uint16Array<ArrayBuffer> {
   const f = new Float32Array(1);
   const u = new Uint32Array(f.buffer);
   const out = new Uint16Array(values.length);
@@ -404,7 +404,7 @@ export function unpackModel(buffer: ArrayBuffer): PhononModel {
 }
 
 /** A catalog voice file: its speaker latents as [125 frames][512]. */
-export function readVoice(buffer: ArrayBuffer): Float32Array {
+export function readVoice(buffer: ArrayBuffer): Float32Array<ArrayBuffer> {
   const t = readSafetensors(buffer).get("speaker_wavs");
   if (!t) throw new Error("The voice file has no speaker_wavs");
   const [, channels, frames] = t.shape;

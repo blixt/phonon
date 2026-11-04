@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { packModel, quantize, unpackModel, type PhononModel } from "./checkpoint";
-import { Q8_GROUP } from "./kernels";
+import { Q8_GROUP } from "./graph";
 
 test("quantizes each group to its largest value over 127, rounding halves to even", () => {
   const values = new Float32Array(2 * Q8_GROUP);

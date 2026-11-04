@@ -17,7 +17,8 @@ import {
   type ModelFiles,
   type ModelId,
 } from "./files";
-import { PhononEngine, TEXT_MAX } from "./engine";
+import { PhononEngine, TEXT_MAX, type Engine } from "./engine";
+import { GpuGraph } from "./gpu";
 import { paceForSpeed } from "./pace";
 import { SAMPLE_RATE, WordTimes, wordRanges, type Span, type Word } from "./timing";
 import { Tokenizer } from "./tokenizer";
@@ -141,7 +142,7 @@ export interface SpeakOptions {
 
 /** The model, ready to speak. */
 export class Phonon {
-  private readonly engine: PhononEngine;
+  private readonly engine: Engine;
   private readonly tokenizer: Tokenizer;
   private readonly catalog: Voice[];
   /** Settles when the GPU device is lost (a reset): load again to go on. */
@@ -153,7 +154,7 @@ export class Phonon {
   private readonly lag: number;
 
   private constructor(
-    engine: PhononEngine,
+    engine: Engine,
     tokenizer: Tokenizer,
     catalog: Voice[],
     languages: Language[],
@@ -200,7 +201,7 @@ export class Phonon {
           })),
       ),
     ]);
-    const engine = new PhononEngine(device, blob, { subgroups, align: files.align });
+    const engine = new PhononEngine(new GpuGraph(device, blob, subgroups), blob, files.align);
     await engine.ready();
     return new Phonon(engine, tokenizer, catalog, files.languages, files.align.lag, device.lost);
   }
