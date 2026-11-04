@@ -25,9 +25,9 @@ const FRAMES_PER_SECOND = 12.5;
 const COPY_DST = 0x08;
 const MAP_READ = 0x01;
 /** Each submit's readback: the state, its chunk's audio, then the alignment rows of the frames
- *  it made (at most 8 steps and frame 0's row). */
+ *  it made (frame 0 first, then at most 8 steps). */
 const AUDIO_AT = 16;
-const ROWS = 16;
+const ROWS = Math.max(...CHUNKS);
 
 export class PhononEngine {
   private readonly g: Graph;
@@ -40,7 +40,7 @@ export class PhononEngine {
   private readonly rowsAt: number;
   private pace = Number.NaN;
   /** Settles when the text in progress has drained. */
-  private turn: Promise<unknown> = Promise.resolve();
+  private turn: Promise<void> = Promise.resolve();
 
   constructor(
     device: GPUDevice,
@@ -51,9 +51,8 @@ export class PhononEngine {
     this.g = new Graph(device, model, subgroups);
     this.lm = new LanguageModel(this.g, lmLayers(model), align);
     this.codec = new Codec(this.g, this.lm.lats);
-    const most = Math.max(...CHUNKS);
-    this.rowsAt = AUDIO_AT + most * FRAME * 4;
-    this.stages = Array.from({ length: DEPTH + 1 }, () =>
+    this.rowsAt = AUDIO_AT + ROWS * FRAME * 4;
+    this.stages = Array.from({ length: DEPTH }, () =>
       device.createBuffer({ size: this.rowsAt + ROWS * TEXT_MAX * 4, usage: COPY_DST | MAP_READ }),
     );
     this.setPace(0);
@@ -97,7 +96,8 @@ export class PhononEngine {
    *  text at a time: a call waits until the one before has drained, cancelled or not. */
   synthesize(...args: Parameters<PhononEngine["run"]>): ReturnType<PhononEngine["run"]> {
     const next = this.turn.then(() => this.run(...args));
-    this.turn = next.catch(() => {});
+    // Keep completion in the queue, so it does not retain the last text's audio.
+    this.turn = next.then(() => {}, () => {});
     return next;
   }
 

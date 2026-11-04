@@ -12,8 +12,8 @@ const UNIFORM = 0x40;
 const COPY_DST = 0x08;
 const COPY_SRC = 0x04;
 const COMPUTE = 0x4;
-/** Split-K partials of the largest GEMM (the decoder's last transposed convolution). */
-const SCRATCH = 8 << 20;
+/** Largest split-K partials: 8-frame s2 and s3 each need 7.5 MiB. */
+const SCRATCH = 7.5 * 2 ** 20;
 
 interface Pipe {
   layout: GPUBindGroupLayout;

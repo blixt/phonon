@@ -43,8 +43,6 @@ export declare class LanguageModel {
     private readonly kc;
     private readonly vc;
     private readonly ids;
-    /** The noise's uniform (kernels.ts UNIFORMS.noise: seed, then scale), written per text. */
-    private readonly noise;
     /** The BOS row's output on its way to row 0, where the step's tail reads. */
     private readonly bos;
     private readonly voiceIn;

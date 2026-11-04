@@ -18,8 +18,8 @@ export type Residual = "none" | "add" | "add_y" | "gate" | "gate_y" | "vec";
 /** The state buffer's u32 slots: the position the next LM step feeds, the frame it makes, the
  *  frames to keep once the end of speech is seen (0 before), the first 200 Hz position of the
  *  codec's chunk, the text's length in tokens, and the frames to keep after the end-of-speech
- *  frame. */
-export const STATE = { pos: 0, frame: 1, end: 2, chunk: 3, text: 4, after: 5 } as const;
+ *  frame, then the noise seed and its f32 scale (stored as u32 bits). */
+export const STATE = { pos: 0, frame: 1, end: 2, chunk: 3, text: 4, after: 5, seed: 6, scale: 7 } as const;
 /** Where the alignment head's scores go: one row per frame over the text tokens, which start
  *  at position `lo`, `width` floats per row. */
 export interface Align {
@@ -38,7 +38,6 @@ export const UNIFORMS = {
   layernorm: ["go", "bo"],
   rows: ["rows", "pos0"],
   embedRows: ["eo", "eso", "bo"],
-  noise: ["seed", "scale"],
   upsample: ["T", "wo", "wso", "mo", "so"],
   shiftRows: ["src", "count"],
   gemm: ["M", "yo", "ro", "rows", "wo", "bo", "wso"],
@@ -87,7 +86,7 @@ export interface GemvOptions {
 /** int8 weights per f16 scale. */
 export const Q8_GROUP = 32;
 
-const { pos: POS, frame: FRAME, end: END, chunk: CHUNK, text: TEXT, after: AFTER } = STATE;
+const { pos: POS, frame: FRAME, end: END, chunk: CHUNK, text: TEXT, after: AFTER, seed: SEED, scale: SCALE } = STATE;
 const GATES: Record<Gate, string> = {
   none: "",
   step: `if (st[${END}] != 0u && st[${FRAME}] >= st[${END}]) { return; }`,
@@ -132,21 +131,12 @@ function residual(res: Residual, ri: string): string {
   }[res];
 }
 
-/** Sum over each segment of W lanes within 32 (W a power of 2): subgroup shuffles, or shared memory. */
-function segmentSum(sg: boolean, W: number): string {
-  if (W === 1) return "fn sumSeg(v: f32, li: u32) -> f32 { return v; }";
-  if (sg) {
-    if (W === 32) return "fn sumSeg(v: f32, li: u32) -> f32 { return subgroupAdd(v); }";
-    let body = "var t = v;";
-    for (let s = W / 2; s >= 1; s /= 2) body += ` t += subgroupShuffleXor(t, ${s}u);`;
-    return `fn sumSeg(v: f32, li: u32) -> f32 { ${body} return t; }`;
-  }
-  return `var<workgroup> r32: array<f32, 256>;
-fn sumSeg(v: f32, li: u32) -> f32 {
-  r32[li] = v; workgroupBarrier();
-  for (var s = ${W / 2}u; s > 0u; s >>= 1u) { if ((li % ${W}u) < s) { r32[li] += r32[li + s]; } workgroupBarrier(); }
-  let o = r32[li - (li % ${W}u)]; workgroupBarrier(); return o;
-}`;
+/** Sum over each segment of W subgroup lanes (W a power of 2, from 2 to 32). */
+function subgroupSum(W: number): string {
+  if (W === 32) return "fn sumSeg(v: f32, li: u32) -> f32 { return subgroupAdd(v); }";
+  let body = "var t = v;";
+  for (let s = W / 2; s >= 1; s /= 2) body += ` t += subgroupShuffleXor(t, ${s}u);`;
+  return `fn sumSeg(v: f32, li: u32) -> f32 { ${body} return t; }`;
 }
 
 /** LayerNorm over 512 channels per row (one workgroup each), with its affine weights. */
@@ -331,19 +321,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 /** Noise for the next latent: Box-Muller over a counter hash of the seed and frame. */
 export function noise(): string {
   return `
-${struct(UNIFORMS.noise, { scale: "f32" })}
 @group(0) @binding(0) var<storage, read_write> z: array<f32>;
 @group(0) @binding(1) var<storage, read> st: array<u32>;
-@group(0) @binding(2) var<uniform> p: P;
 fn pcg(v: u32) -> u32 { var s = v * 747796405u + 2891336453u; let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u; return (w >> 22u) ^ w; }
 @compute @workgroup_size(32)
 fn main(@builtin(local_invocation_index) i: u32) {
   _ = &z; _ = &st;
   ${GATES.step}
   let f = st[${FRAME}];
-  let a = pcg(p.seed ^ pcg(f * 64u + i * 2u)); let b = pcg(a ^ 0x9e3779b9u);
+  let a = pcg(st[${SEED}] ^ pcg(f * 64u + i * 2u)); let b = pcg(a ^ 0x9e3779b9u);
   let u1 = (f32(a >> 8u) + 1.0) / 16777217.0; let u2 = f32(b >> 8u) / 16777216.0;
-  z[i] = sqrt(-2.0 * log(u1)) * cos(6.283185307 * u2) * p.scale;
+  z[i] = sqrt(-2.0 * log(u1)) * cos(6.283185307 * u2) * bitcast<f32>(st[${SCALE}]);
 }`;
 }
 
@@ -576,7 +564,9 @@ export function gemvShape(K: number) {
 
 /** GEMV for one row of an LM step: y[n] = epilogue(sum_k x[k] w[n, k]) with int8 weights.
  *  32 lanes per output row, 2 rows per 32 lanes, 16-byte weight loads. Optional prologues:
- *  LayerNorm (affine and/or adaLN modulation) or the attention splits' merge. */
+ *  LayerNorm (affine and/or adaLN modulation) or the attention splits' merge. Without
+ *  subgroups, both rows share one vec2 reduction with the same per-row summation order;
+ *  only each segment's first lane uses its sums, and the scratch is not reused. */
 export function gemv({
   K,
   N,
@@ -598,12 +588,12 @@ export function gemv({
   ${
     sg
       ? `s1 = subgroupAdd(s1); s2 = subgroupAdd(s2);
-  if ((li & 31u) == 0u) { lnr[li >> 5u] = vec2<f32>(s1, s2); }`
+  if ((li & 31u) == 0u) { lnr[li >> 5u] = vec2<f32>(s1, s2); }
+  workgroupBarrier();`
       : `lnr[li] = vec2<f32>(s1, s2);
   workgroupBarrier();
   for (var s = ${WG / 2}u; s > 0u; s >>= 1u) { if (li < s) { lnr[li] += lnr[li + s]; } workgroupBarrier(); }`
   }
-  workgroupBarrier();
   var t = vec2<f32>(0.0);
   ${sg ? `for (var i = 0u; i < ${WG / 32}u; i++) { t += lnr[i]; }` : "t = lnr[0];"}
   let mean = t.x / 512.0;
@@ -618,20 +608,19 @@ export function gemv({
     : combine
       ? `
   // part: [split][head] blocks of 66 floats: 64 dims, max, sum
-  for (var c = li; c < 512u; c += ${WG}u) {
-    let h = c / 64u; let d = c % 64u;
+  for (var i = li; i < 128u; i += ${WG}u) {
+    let h = i / 16u; let d = (i % 16u) * 4u;
     var mx = -1e30;
     for (var s = 0u; s < ${combine}u; s++) { mx = max(mx, r[(s * 8u + h) * 66u + 64u]); }
-    var num = 0.0; var den = 0.0;
+    var num = vec4<f32>(0.0); var den = 0.0;
     for (var s = 0u; s < ${combine}u; s++) {
       let b = (s * 8u + h) * 66u;
       let f = exp(r[b + 64u] - mx);
-      num += r[b + d] * f; den += r[b + 65u] * f;
+      num += vec4<f32>(r[b + d], r[b + d + 1u], r[b + d + 2u], r[b + d + 3u]) * f;
+      den += r[b + 65u] * f;
     }
-    xsf[c] = num / den;
+    xs[i] = num / den;
   }
-  workgroupBarrier();
-  for (var i = li; i < 128u; i += ${WG}u) { xs[i] = vec4<f32>(xsf[i * 4u], xsf[i * 4u + 1u], xsf[i * 4u + 2u], xsf[i * 4u + 3u]); }
   workgroupBarrier();`
       : `
   for (var i = li; i < ${K4}u; i += ${WG}u) { xs[i] = x[${xo} + i]; }
@@ -648,10 +637,9 @@ ${struct(UNIFORMS.gemv)}
 @group(0) @binding(7) var<storage, read> st: array<u32>;
 var<workgroup> xs: array<vec4<f32>, ${Math.max(K4, 128)}>;
 ${ln ? `var<workgroup> lnr: array<vec2<f32>, ${sg ? WG / 32 : WG}>;` : ""}
-${combine ? "var<workgroup> xsf: array<f32, 512>;" : ""}
 ${BLOB}
 ${ACT}
-${segmentSum(sg, LPR)}
+${sg ? subgroupSum(LPR) : `var<workgroup> r32: array<vec2<f32>, ${WG}>;`}
 @compute @workgroup_size(${WG})
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
   _ = &x; _ = &wv; _ = &y; _ = &r; _ = &gv; _ = &md; _ = &st;
@@ -675,8 +663,10 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
       }
     }
   }
-  for (var j = 0u; j < ${R}u; j++) {
-    let tot = sumSeg(acc[j], li);
+  ${sg ? "" : `r32[li] = vec2<f32>(acc[0], acc[1]); workgroupBarrier();
+  for (var s = ${LPR / 2}u; s > 0u; s >>= 1u) { if (ul < s) { r32[li] += r32[li + s]; } workgroupBarrier(); }
+  `}for (var j = 0u; j < ${R}u; j++) {
+    let tot = ${sg ? "sumSeg(acc[j], li)" : "r32[li][j]"};
     let n = n0 + j * ${RPP}u;
     if (ul == 0u && n < ${N}u) {
       var v = tot${bias ? " + hf(p.bo + n)" : ""};

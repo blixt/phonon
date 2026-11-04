@@ -5,7 +5,7 @@ export type Residual = "none" | "add" | "add_y" | "gate" | "gate_y" | "vec";
 /** The state buffer's u32 slots: the position the next LM step feeds, the frame it makes, the
  *  frames to keep once the end of speech is seen (0 before), the first 200 Hz position of the
  *  codec's chunk, the text's length in tokens, and the frames to keep after the end-of-speech
- *  frame. */
+ *  frame, then the noise seed and its f32 scale (stored as u32 bits). */
 export declare const STATE: {
     readonly pos: 0;
     readonly frame: 1;
@@ -13,6 +13,8 @@ export declare const STATE: {
     readonly chunk: 3;
     readonly text: 4;
     readonly after: 5;
+    readonly seed: 6;
+    readonly scale: 7;
 };
 /** Where the alignment head's scores go: one row per frame over the text tokens, which start
  *  at position `lo`, `width` floats per row. */
@@ -38,7 +40,6 @@ export declare const UNIFORMS: {
     readonly layernorm: readonly ["go", "bo"];
     readonly rows: readonly ["rows", "pos0"];
     readonly embedRows: readonly ["eo", "eso", "bo"];
-    readonly noise: readonly ["seed", "scale"];
     readonly upsample: readonly ["T", "wo", "wso", "mo", "so"];
     readonly shiftRows: readonly ["src", "count"];
     readonly gemm: readonly ["M", "yo", "ro", "rows", "wo", "bo", "wso"];
@@ -144,7 +145,9 @@ export declare function gemvShape(K: number): {
 };
 /** GEMV for one row of an LM step: y[n] = epilogue(sum_k x[k] w[n, k]) with int8 weights.
  *  32 lanes per output row, 2 rows per 32 lanes, 16-byte weight loads. Optional prologues:
- *  LayerNorm (affine and/or adaLN modulation) or the attention splits' merge. */
+ *  LayerNorm (affine and/or adaLN modulation) or the attention splits' merge. Without
+ *  subgroups, both rows share one vec2 reduction with the same per-row summation order;
+ *  only each segment's first lane uses its sums, and the scratch is not reused. */
 export declare function gemv({ K, N, act, bias, res, ln, combine, sg, }: GemvOptions): string;
 /** The end of an LM step, with the final LayerNorm fused: the EOS logit from LN(x row 0), the
  *  latent kept, the position and frame moved on, and the end set once the logit passes

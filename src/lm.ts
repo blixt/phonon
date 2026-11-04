@@ -100,8 +100,6 @@ export class LanguageModel {
   private readonly kc: GPUBuffer[];
   private readonly vc: GPUBuffer[];
   private readonly ids: GPUBuffer;
-  /** The noise's uniform (kernels.ts UNIFORMS.noise: seed, then scale), written per text. */
-  private readonly noise: GPUBuffer;
   /** The BOS row's output on its way to row 0, where the step's tail reads. */
   private readonly bos: GPUBuffer;
   private readonly voiceIn: GPUBuffer;
@@ -141,7 +139,6 @@ export class LanguageModel {
     this.parts = g.buffer(SPLITS * 8 * 66 * 4);
     this.voiceIn = g.buffer(PROMPT * H * 4);
     this.align = g.buffer(F_MAX * TEXT_MAX * 4);
-    this.noise = g.u(K.UNIFORMS.noise, {});
     this.tail = this.tailOps();
     this.step = [...Array.from({ length: depth }, (_, i) => this.stepLayer(i)).flat(), ...this.tail];
     this.voiceOps = [
@@ -226,14 +223,12 @@ export class LanguageModel {
     padded.set(ids);
     padded[ids.length] = BOS;
     device.queue.writeBuffer(this.ids, 0, padded);
-    const noise = new DataView(new ArrayBuffer(16));
-    noise.setUint32(0, seed >>> 0, true);
-    noise.setFloat32(4, Math.sqrt(temperature), true);
-    device.queue.writeBuffer(this.noise, 0, noise.buffer);
     const state = new Uint32Array(8);
     state[K.STATE.pos] = PROMPT + ids.length;
     state[K.STATE.after] = framesAfterEos;
     state[K.STATE.text] = ids.length;
+    state[K.STATE.seed] = seed >>> 0;
+    new Float32Array(state.buffer)[K.STATE.scale] = Math.sqrt(temperature);
     device.queue.writeBuffer(this.g.state, 0, state);
     const bytes = PROMPT * H * KV_BYTES;
     for (let i = 0; i < this.depth; i++) {
@@ -330,7 +325,7 @@ export class LanguageModel {
         ln: { w: "norm.w", b: "norm.b", eps: LN_EPS },
       }),
       g.gemv(this.cond, "fh.ada.w", this.ada, { K: H, N: 10240, bias: "fh.ada.b" }),
-      g.op(K.noise(), [this.z, g.state, this.noise], [1, 1, 1]),
+      g.op(K.noise(), [this.z, g.state], [1, 1, 1]),
       g.gemv(this.z, "fh.in.w", this.fh, { K: 32, N: H, bias: "fh.in.b" }),
       ...blocks,
       g.gemv(this.fh, "fh.out.w", this.lat, {
