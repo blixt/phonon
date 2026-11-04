@@ -445,7 +445,9 @@ async function demo(redrawBars: () => void) {
     if (note !== undefined) s.querySelector("span")!.textContent = note;
   };
   const gpu = (navigator as Navigator & { gpu?: GPU }).gpu;
-  const adapter = await gpu?.requestAdapter({ powerPreference: "high-performance" }).catch(() => null);
+  // "?cpu=force" runs the CPU tier even where WebGPU works, to compare the two on one device.
+  const forced = new URL(location.href).searchParams.get("cpu") === "force";
+  const adapter = forced ? null : await gpu?.requestAdapter({ powerPreference: "high-performance" }).catch(() => null);
   const model = $<HTMLSelectElement>("model");
   const id = () => model.value as ModelId;
   /** The GPU line: what runs here, or why nothing does. */
@@ -459,9 +461,11 @@ async function demo(redrawBars: () => void) {
   const info = adapter?.info;
   const gpuName = info
     ? `GPU: ${[info.vendor, info.architecture].filter(Boolean).join(" ") || "unknown"}`
-    : gpu
-      ? "CPU: this browser gave no GPU"
-      : "CPU: this browser has no WebGPU";
+    : forced
+      ? "CPU: chosen with ?cpu=force"
+      : gpu
+        ? "CPU: this browser gave no GPU"
+        : "CPU: this browser has no WebGPU";
   /** The CPU's threads and build, once a model has loaded there. */
   let cpuName: string | null = null;
   let lastError: string | null = null;
@@ -535,6 +539,7 @@ async function demo(redrawBars: () => void) {
       if (which === id()) set("s-load", "…", "loading");
       const p = await Phonon.load({
         model: which,
+        backend: forced ? "cpu" : "auto",
         progress: (percent) => {
           downloaded = true;
           if (which === id()) set("s-load", `${percent}%`, "of the model");
