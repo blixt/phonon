@@ -45,7 +45,19 @@ export class CpuEngine implements Engine {
     this.threads = info.threads;
     this.simd = info.simd;
     worker.onmessage = (e: MessageEvent<FromWorker>) => this.hear(e.data);
+    // A worker that dies (out of memory) fails every text in flight, and later ones at once.
+    let lose: (e: Error) => void = () => {};
+    this.lost = new Promise((settle) => (lose = settle));
+    worker.onerror = (e) => {
+      this.dead = new Error(e.message || "The CPU engine's worker stopped.");
+      for (const job of this.jobs.values()) job.fail(this.dead);
+      this.jobs.clear();
+      lose(this.dead);
+    };
   }
+  private dead: Error | null = null;
+  /** Settles when the worker stops: load again to go on. */
+  readonly lost: Promise<Error>;
 
   /** Starts the worker with a model's packed weights (moved to it, not copied). */
   static async start(packed: ArrayBuffer, align: { layer: number; head: number }, threads: number): Promise<CpuEngine> {
@@ -74,6 +86,7 @@ export class CpuEngine implements Engine {
       m.latents = latents.slice();
       this.voices.add(voice);
     }
+    if (this.dead) return Promise.reject(this.dead);
     return new Promise((done, fail) => {
       this.jobs.set(id, { options, chunks: [], done, fail, cancelSent: false });
       this.worker.postMessage(m, m.latents ? [m.latents.buffer] : []);

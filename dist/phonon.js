@@ -36,7 +36,19 @@ var init_remote = __esm({
         this.threads = info.threads;
         this.simd = info.simd;
         worker.onmessage = (e) => this.hear(e.data);
+        let lose = () => {
+        };
+        this.lost = new Promise((settle) => lose = settle);
+        worker.onerror = (e) => {
+          this.dead = new Error(e.message || "The CPU engine's worker stopped.");
+          for (const job of this.jobs.values()) job.fail(this.dead);
+          this.jobs.clear();
+          lose(this.dead);
+        };
       }
+      dead = null;
+      /** Settles when the worker stops: load again to go on. */
+      lost;
       /** Starts the worker with a model's packed weights (moved to it, not copied). */
       static async start(packed, align, threads) {
         const worker = new Worker(new URL("./phonon-cpu.js", import.meta.url), { type: "module" });
@@ -62,6 +74,7 @@ var init_remote = __esm({
           m.latents = latents.slice();
           this.voices.add(voice);
         }
+        if (this.dead) return Promise.reject(this.dead);
         return new Promise((done, fail) => {
           this.jobs.set(id, { options, chunks: [], done, fail, cancelSent: false });
           this.worker.postMessage(m, m.latents ? [m.latents.buffer] : []);
@@ -2161,7 +2174,7 @@ var Phonon = class _Phonon {
   engine;
   tokenizer;
   catalog;
-  /** Settles when the GPU device is lost (a reset): load again to go on. */
+  /** Settles when the GPU device is lost (a reset), or the CPU's worker stops: load again to go on. */
   lost;
   backend;
   /** The voice `speak` uses when none is given: the default of the model's first language. */
@@ -2203,8 +2216,7 @@ var Phonon = class _Phonon {
       const { CpuEngine: CpuEngine2 } = await Promise.resolve().then(() => (init_remote(), remote_exports));
       const cores = navigator.hardwareConcurrency || 1;
       const engine2 = await CpuEngine2.start(packed, files.align, threads ?? Math.min(8, cores));
-      return make(engine2, new Promise(() => {
-      }), { name: "cpu", threads: engine2.threads, simd: engine2.simd });
+      return make(engine2, engine2.lost, { name: "cpu", threads: engine2.threads, simd: engine2.simd });
     }
     const subgroups = subgroups32(adapter);
     const device = await adapter.requestDevice({ requiredFeatures: subgroups ? ["subgroups"] : [] });

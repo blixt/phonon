@@ -32,6 +32,9 @@ export declare class CpuEngine implements Engine {
     private readonly jobs;
     private next;
     private constructor();
+    private dead;
+    /** Settles when the worker stops: load again to go on. */
+    readonly lost: Promise<Error>;
     /** Starts the worker with a model's packed weights (moved to it, not copied). */
     static start(packed: ArrayBuffer, align: {
         layer: number;

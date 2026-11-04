@@ -166,7 +166,7 @@ export class Phonon {
   private readonly engine: Engine;
   private readonly tokenizer: Tokenizer;
   private readonly catalog: Voice[];
-  /** Settles when the GPU device is lost (a reset): load again to go on. */
+  /** Settles when the GPU device is lost (a reset), or the CPU's worker stops: load again to go on. */
   readonly lost: Promise<unknown>;
   readonly backend: Backend;
 
@@ -227,7 +227,7 @@ export class Phonon {
       const { CpuEngine } = await import("./remote");
       const cores = navigator.hardwareConcurrency || 1;
       const engine = await CpuEngine.start(packed, files.align, threads ?? Math.min(8, cores));
-      return make(engine, new Promise(() => {}), { name: "cpu", threads: engine.threads, simd: engine.simd });
+      return make(engine, engine.lost, { name: "cpu", threads: engine.threads, simd: engine.simd });
     }
     const subgroups = subgroups32(adapter);
     const device = await adapter.requestDevice({ requiredFeatures: subgroups ? ["subgroups"] : [] });

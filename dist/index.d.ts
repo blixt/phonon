@@ -55,7 +55,7 @@ export declare class Phonon {
     private readonly engine;
     private readonly tokenizer;
     private readonly catalog;
-    /** Settles when the GPU device is lost (a reset): load again to go on. */
+    /** Settles when the GPU device is lost (a reset), or the CPU's worker stops: load again to go on. */
     readonly lost: Promise<unknown>;
     readonly backend: Backend;
     /** The voice `speak` uses when none is given: the default of the model's first language. */
