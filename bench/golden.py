@@ -8,7 +8,7 @@ from parity import reference, logmel
 
 phrases = {p["id"]: p["text"] for p in json.load(open(os.path.join(os.path.dirname(__file__), "phrases.json")))["phrases"]}
 clips = []
-for id, seed in [("h04", 1), ("h05", 1), ("h06", 1), ("h02", 2), ("h09", 3)]:
+for id, seed in [("h04", 1), ("h05", 1), ("h06", 1), ("h07", 2), ("h09", 3)]:
     a = reference(phrases[id], seed)
     mel = np.round(logmel(a) * 4).astype(np.int16)
     clips.append({"id": id, "seed": seed, "text": phrases[id], "frames": len(a) / 1920, "melFrames": mel.shape[0],

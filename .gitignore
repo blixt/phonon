@@ -3,3 +3,4 @@ bench/results/audio/
 bench/results/timing/
 bench/results-try1/
 .test/
+__pycache__/
