@@ -7,6 +7,9 @@ const hubFile = (repo: string, revision: string, path: string) =>
 export const MODEL_CACHE = "phonon-webgpu";
 
 export type Language = "en" | "fr" | "de" | "es" | "pt";
+/** Each language's default voice. Outside English, the one UTMOS rated highest, with no word
+ *  errors, in its 40M model; in English, the benchmark's voice. */
+export const DEFAULT_VOICE: Record<Language, string> = { en: "Delia", fr: "Augustin", de: "Mats", es: "Marcos", pt: "Davi" };
 export interface ModelFiles {
   /** Gradium's checkpoint the weights come from. */
   source: { repo: string; revision: string };

@@ -18,31 +18,37 @@ const ctx = remote
 // HF_LOCAL="owner/repo=DIR,…" serves those Hugging Face repositories' files from local copies,
 // and answers phonon-tts's lookup of them as for a public repository: phonon-tts loads only public
 // repositories in a browser, and Gradium's 40M models are gated. Files go through a local server,
-// as a route that fulfils a large body drops the page.
+// as a route that fulfils a large body drops the page. It listens on loopback only, and serves
+// only the files of a mapped repository, each under a random id the route hands out.
+let files = null;
 if (process.env.HF_LOCAL) {
   const { createServer } = await import("node:http");
   const { createReadStream, readdirSync, statSync } = await import("node:fs");
+  const { randomUUID } = await import("node:crypto");
   const local = Object.fromEntries(process.env.HF_LOCAL.split(",").map((e) => e.split("=")));
-  const files = createServer((q, r) => {
-    const f = decodeURIComponent(q.url.split("?")[0]);
+  const served = new Map();
+  files = createServer((q, r) => {
+    const f = served.get(q.url.slice(1));
     r.setHeader("access-control-allow-origin", "*");
     r.setHeader("cross-origin-resource-policy", "cross-origin");
-    try {
-      r.setHeader("content-length", statSync(f).size);
-      createReadStream(f).pipe(r);
-    } catch {
-      r.statusCode = 404;
-      r.end();
-    }
-  }).listen(0);
+    if (!f) return r.writeHead(404).end();
+    r.setHeader("content-length", statSync(f).size);
+    createReadStream(f).pipe(r);
+  });
+  await new Promise((resolve) => files.listen(0, "127.0.0.1", resolve));
   const filesUrl = `http://127.0.0.1:${files.address().port}`;
   const cors = { "access-control-allow-origin": "*", "cross-origin-resource-policy": "cross-origin" };
-  await ctx.route(/huggingface\.co\/(api\/models\/)?([^/]+\/[^/]+)\/(resolve|revision)\/([^/]+)(\/[^?]+)?/, (route) => {
+  await ctx.route(/huggingface\.co\/(api\/models\/)?([^/]+\/[^/]+)\/(resolve|revision)\/([^/?]+)(\/[^?]+)?/, (route) => {
     const [, api, repo, , revision, file] = route.request().url().match(/huggingface\.co\/(api\/models\/)?([^/]+\/[^/]+)\/(resolve|revision)\/([^/?]+)(\/[^?]+)?/);
     if (!local[repo]) return route.continue();
+    const names = readdirSync(local[repo]);
     if (api)
-      return route.fulfill({ status: 200, contentType: "application/json", headers: cors, body: JSON.stringify({ sha: revision, gated: false, siblings: readdirSync(local[repo]).map((rfilename) => ({ rfilename })) }) });
-    route.fulfill({ status: 302, headers: { ...cors, location: `${filesUrl}${join(local[repo], file)}` } });
+      return route.fulfill({ status: 200, contentType: "application/json", headers: cors, body: JSON.stringify({ sha: revision, gated: false, siblings: names.map((rfilename) => ({ rfilename })) }) });
+    const name = decodeURIComponent(file ?? "").slice(1);
+    if (!names.includes(name)) return route.fulfill({ status: 404, headers: cors });
+    const id = randomUUID();
+    served.set(id, join(local[repo], name));
+    route.fulfill({ status: 302, headers: { ...cors, location: `${filesUrl}/${id}` } });
   });
 }
 const page = await ctx.newPage();
@@ -65,3 +71,4 @@ for (;;) {
   await new Promise((r) => setTimeout(r, 2000));
 }
 await (remote ? page.close() : ctx.close());
+files?.close();

@@ -9,7 +9,7 @@ Fast text-to-speech in the browser, with a start and end time for every word.
 blixt/phonon is a WebGPU runtime for [Phonon 31M](https://huggingface.co/gradium/phonon-31m-en), an Apache-2.0 text-to-speech model by [Gradium](https://gradium.ai). Gradium did not make blixt/phonon. It also runs Gradium's larger 40M models in English, French, German, Spanish and Portuguese, which are not for commercial use ([Other models](#other-models)).
 
 - It makes 24 kHz English speech in any of Gradium's English voices, and streams the audio as it goes.
-- It gives the start and end time of every word and of each token in it, while it speaks: each word's times arrive before the word is heard.
+- It gives the start and end time of every word and of each token in it, while it speaks.
 - The speaking speed goes from about 0.77× to 1.3×.
 - It downloads Gradium's weights with the large matrices converted to 8-bit integers (43.7 MB, [on Hugging Face](https://huggingface.co/blixt/phonon-31m-en-webgpu)) and keeps them in the browser's cache.
 - It runs in Chrome on macOS and Windows and in Safari on iOS, and a user ran it in Firefox on a Pixel 10 Pro. Other browsers are not tested.
@@ -80,7 +80,7 @@ const speech = await tts.speak("The birch canoe slid on the smooth planks.", {
   voice: "Delia", // any voice of Gradium's catalog in the model's languages: tts.voices
   speed: 1,
   onAudio: (samples) => {}, // each chunk, as soon as it exists
-  onWord: (word) => {}, // each word with its times, in order, before it is heard
+  onWord: (word) => {}, // each word with its times, in order, as soon as they are known
 });
 // speech.audio: Float32Array at speech.sampleRate (24000)
 // speech.words: [{ text: "The", start: 0.13, end: 0.40, tokens: [{ text: "The", start: 0.13, end: 0.40 }] }, …], in seconds
@@ -169,7 +169,7 @@ An empty dependent dispatch costs about 1.6 µs in Chrome and WebKit on the M3 M
 3. Turn the scores into a position. For each frame, take the token with the highest score and average the token index over the 2 tokens on each side of it, with softmax weights. The position never moves back. Frame 0's position counts no further than frame 1's: frame 0's row comes from the end-of-text query, and in some 40M models that query reads the last token, which would pin every word to the start.
 4. Correct the lead. The head reaches a word about 230 ms (about 3 frames) before the audio does, and the times shift back by 3 frames. After a pause, the head reaches the next word 400 to 570 ms early, because it moves on when the previous word ends. A word start that falls where the audio is quieter than −45 dB (in 10 ms steps) moves to where the sound begins.
 5. Group the tokens into words. A token that starts with ▁ starts a word, unless it is only punctuation.
-6. Report each word once nothing still to come can change it. Every step looks only at earlier frames and audio, except three short looks ahead: interpolation needs the next frame, the silence step needs the audio up to where sound begins, and a word's end is the next word's start. [timing.ts](src/timing.ts) takes frames and audio as they arrive and reports a word as soon as the token after it has its start. A whole text goes through the same code. On 47 texts in all seven models (814 words), the words reported while speaking, the words of the finished text and the times from the previous all-at-once code were identical. A word arrives when about as much audio exists as reaches its start (median), 0.42 s past it at the 90th percentile and 1.2 s after a long pause. Playback starts with the first chunk, so a device that makes audio at least about twice as fast as real time gets every word before it is heard.
+6. Report each word once nothing still to come can change it. Every step looks only at earlier frames and audio, except three short looks ahead: interpolation needs the next frame, the silence step needs the audio up to where sound begins, and a word's end is the next word's start. [timing.ts](src/timing.ts) takes frames and audio as they arrive and reports a word as soon as the token after it has its start. A whole text goes through the same code, and on 47 texts in all seven models (814 words) the words reported while speaking equalled the words of the finished text. A word's end waits for the next word's start, and the last word waits for the end of the text. With audio made much faster than real time, a word arrives before it is heard. A long word, or a device that makes audio only a little faster than real time, can make it arrive after its sound has begun.
 
 I chose the 3-frame shift and the −45 dB threshold on 110 words of four other texts. On those words, a 4-frame shift without the silence step was a mean 110 ms from a wav2vec2 forced aligner, and the chosen settings were about 55 ms. The figure above is a held-out check on the 11 benchmark texts in 4 voices (712 words). Word starts are a mean 67 ms and a median 65 ms from the aligner, 76% are within 100 ms, and the 90th percentile is 125 ms. The median signed difference is +40 ms, with the engine later. Only word starts were scored here, and the aligner has its own error of a few tens of milliseconds. The "never move back" rule could also hide a repeated or skipped word.
 
@@ -184,7 +184,7 @@ Each 40M model has its own head, and [files.ts](src/files.ts) names it. To find 
 | `phonon-40m-pt` | 4, 2 | 4, 5 | 58 ms, 55 ms | 86% |
 | `phonon-40m-multilingual` | 4, 1 | 4, 4 | 35 to 57 ms by language | 84 to 97% |
 
-The held-out check is 6 other texts in 2 voices for each language (106 to 124 words), scored with MMS. The multilingual model's head was chosen on English and held up in all five languages. Phonon 31M's word times are unchanged by the frame 0 rule.
+The held-out check is 6 other texts in 2 voices for each language (106 to 124 words), scored with MMS. The multilingual model's head was chosen on English and held up in all five languages.
 
 Token starts inside words come from the same head and are about as close as word starts. MMS aligns each character, which gives the true start of a token in the middle of a word:
 

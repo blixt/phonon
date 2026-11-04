@@ -359,14 +359,13 @@ function details(adapter: GPUAdapter | null, model: string, error: string | null
   ].join("\n");
 }
 
-/** Each language's first voice (outside English, the one UTMOS rated highest with no word errors
- *  in its 40M model) and sample text: a sample still in the box follows the voice's language. */
-const LANGUAGES: Record<Language, { name: string; voice: string; sample: string }> = {
-  en: { name: "English", voice: "Delia", sample: "The birch canoe slid on the smooth planks. Glue the sheet to the dark blue background." },
-  fr: { name: "French", voice: "Augustin", sample: "Le petit chat dort au soleil près de la fenêtre. Demain, nous irons au marché acheter du pain frais." },
-  de: { name: "German", voice: "Mats", sample: "Der kleine Hund spielt im Garten mit einem roten Ball. Morgen fahren wir mit dem Zug nach Berlin." },
-  es: { name: "Spanish", voice: "Marcos", sample: "El niño camina por la playa al atardecer. Mañana vamos a visitar a mis abuelos en el pueblo." },
-  pt: { name: "Portuguese", voice: "Davi", sample: "O menino corre pelo parque com o seu cachorro. Amanhã vamos viajar para o Rio de Janeiro." },
+/** Each language's name and sample text: a sample still in the box follows the voice's language. */
+const LANGUAGES: Record<Language, { name: string; sample: string }> = {
+  en: { name: "English", sample: "The birch canoe slid on the smooth planks. Glue the sheet to the dark blue background." },
+  fr: { name: "French", sample: "Le petit chat dort au soleil près de la fenêtre. Demain, nous irons au marché acheter du pain frais." },
+  de: { name: "German", sample: "Der kleine Hund spielt im Garten mit einem roten Ball. Morgen fahren wir mit dem Zug nach Berlin." },
+  es: { name: "Spanish", sample: "El niño camina por la playa al atardecer. Mañana vamos a visitar a mis abuelos en el pueblo." },
+  pt: { name: "Portuguese", sample: "O menino corre pelo parque com o seu cachorro. Amanhã vamos viajar para o Rio de Janeiro." },
 };
 /** The model the benchmark measured: only its numbers join the charts. */
 const BENCHMARKED: ModelId = "phonon-31m-en";
@@ -438,9 +437,12 @@ async function demo(redrawBars: () => void) {
   let tts: Phonon | null = null;
   const language = () => tts?.voices.find((v) => v.name === voice.value)?.language ?? "en";
   /** Shows the chosen model's state: its download before it loads, then its load time. */
-  const describe = (start?: { ms: number; downloaded: boolean }) => {
+  /** Each loaded model's first audio after its load, and whether the load downloaded it. */
+  const started = new Map<ModelId, { ms: number; downloaded: boolean }>();
+  const describe = () => {
     const m = MODELS[id()];
     note(m.license === "Apache-2.0" ? gpuName : `${gpuName} · CC BY-NC 4.0, non-commercial`);
+    const start = started.get(id());
     if (start) set("s-load", ms(start.ms), start.downloaded ? "first visit" : "cold start");
     else set("s-load", `${downloadMb(id())} MB`, "download");
   };
@@ -467,7 +469,7 @@ async function demo(redrawBars: () => void) {
     const keep = voice.value;
     voice.replaceChildren(...voiceOptions(p.voices, MODELS[id()].languages));
     // The chosen voice when the model has it, else the model's first language's voice.
-    voice.value = p.voices.some((v) => v.name === keep) ? keep : LANGUAGES[MODELS[id()].languages[0]].voice;
+    voice.value = p.voices.some((v) => v.name === keep) ? keep : p.defaultVoice;
     followLanguage();
   };
   const load = (which = id()) => {
@@ -493,7 +495,8 @@ async function demo(redrawBars: () => void) {
       // A first visit here depends on this connection, and the chart's are at 50 Mbit/s: only a
       // cold start of the benchmarked model joins the chart.
       if (!downloaded && which === BENCHMARKED) mine.coldStartMs = start;
-      if (which === id()) describe({ ms: start, downloaded });
+      started.set(which, { ms: start, downloaded });
+      if (which === id()) describe();
       redrawBars();
       Object.assign(globalThis, { phonon: p });
       return p;
@@ -539,6 +542,9 @@ async function demo(redrawBars: () => void) {
    *  the audio ends (known once it is all made). */
   let timed: Word[] = [];
   let audioEnd: number | null = null;
+  /** The speech request this page shows: a cancelled one's late callbacks and endings touch
+   *  nothing, as a new one may already be playing. */
+  let session = 0;
   const wordSpans = () => [...words.children] as HTMLElement[];
   const silence = () => {
     for (const s of sources) s.stop();
@@ -580,6 +586,7 @@ async function demo(redrawBars: () => void) {
     sources = [];
   };
   stopAll = () => {
+    session++;
     abort?.abort();
     silence();
     done();
@@ -621,11 +628,14 @@ async function demo(redrawBars: () => void) {
 
   button.onclick = async () => {
     if (abort || sources.length) {
+      session++;
       abort?.abort();
       silence();
       done();
       return;
     }
+    const req = ++session;
+    const ours = () => req === session;
     ctx ??= new AudioContext({ sampleRate: 24000 });
     void ctx.resume();
     abort = new AbortController();
@@ -634,7 +644,7 @@ async function demo(redrawBars: () => void) {
     try {
       const p = tts ?? (await load());
       await warm;
-      if (signal.aborted) return;
+      if (signal.aborted || !ours()) return;
       last = null;
       timed = [];
       audioEnd = null;
@@ -654,9 +664,10 @@ async function demo(redrawBars: () => void) {
         voice: voice.value,
         speed: Number(speed.value),
         signal,
-        // Each word lights from its first token as soon as its times arrive, before it is heard.
-        onWord: (w) => timed.push(w),
+        // Each word lights token by token once its times arrive.
+        onWord: (w) => ours() && timed.push(w),
         onAudio: (chunk) => {
+          if (!ours()) return;
           if (!first) {
             first = performance.now() - t0;
             set("s-first", ms(first));
@@ -669,6 +680,7 @@ async function demo(redrawBars: () => void) {
           live();
         },
       });
+      if (!ours()) return;
       $("s-speed").classList.remove("live");
       live();
       last = speech;
@@ -679,6 +691,7 @@ async function demo(redrawBars: () => void) {
       }
       redrawBars();
     } catch (error) {
+      if (!ours()) return;
       if (!signal.aborted) {
         lastError = `speak ${id()}: ${(error as Error)?.stack ?? error}`;
         set("s-first", "Failed", "to speak");

@@ -11,6 +11,8 @@ export declare class PhononEngine {
     private readonly stages;
     private readonly rowsAt;
     private pace;
+    /** Settles when the text in progress has drained. */
+    private turn;
     constructor(device: GPUDevice, model: PhononModel, { subgroups, align }: {
         subgroups: boolean;
         align: {
@@ -20,23 +22,18 @@ export declare class PhononEngine {
     });
     /** Settles when every shader has compiled. */
     ready(): Promise<void>;
-    /** Registers a voice by its speaker latents, [125][512]. */
-    addVoice(name: string, latents: Float32Array): void;
+    /** Registers a voice by its speaker latents, [125][512]. Its prefill uses the LM's caches, so
+     *  it runs in the queue, before a text (`synthesize`'s `latents`). */
+    private addVoice;
     hasVoice(name: string): boolean;
-    /** The LM's pace (pace.ts): its condition and BOS row are written into the blob. */
-    setPace(delta: number): void;
+    /** The LM's pace (pace.ts): its condition and BOS row are written into the blob, so it is set
+     *  in the queue, before a text (`synthesize`'s `pace`). */
+    private setPace;
     /** Text ids to 24 kHz audio in one voice, in chunks as they are made, with the alignment
-     *  head's scores of each kept frame over the text as they are made. Null when cancelled. */
-    synthesize(ids: number[], voice: string, { seed, words, cancelled, onChunk, onRows, }?: {
-        seed?: number;
-        /** The text's words: a short text keeps more frames after the end of speech. */
-        words?: number;
-        cancelled?: () => boolean;
-        /** Each chunk of audio as it is made. */
-        onChunk?: (samples: Float32Array) => void;
-        /** The alignment rows of the next kept frames, one score per text token each. */
-        onRows?: (rows: Float32Array) => void;
-    }): Promise<Synthesis | null>;
+     *  head's scores of each kept frame over the text as they are made. Null when cancelled. One
+     *  text at a time: a call waits until the one before has drained, cancelled or not. */
+    synthesize(...args: Parameters<PhononEngine["run"]>): ReturnType<PhononEngine["run"]>;
+    private run;
 }
 /** A text's audio, in the chunks it was made in. */
 export interface Synthesis {

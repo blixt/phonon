@@ -8,6 +8,7 @@ import {
 } from "./checkpoint";
 import {
   CATALOG_URL,
+  DEFAULT_VOICE,
   MODEL_CACHE,
   MODELS,
   tokenizerUrl,
@@ -122,7 +123,7 @@ export interface Speech {
 }
 
 export interface SpeakOptions {
-  /** A catalog voice's name ("Delia") or id. */
+  /** A catalog voice's name ("Delia") or id. The model's `defaultVoice` when not given. */
   voice?: string;
   /** Speaking speed, from about 0.77 to 1.3. */
   speed?: number;
@@ -130,8 +131,10 @@ export interface SpeakOptions {
   seed?: number;
   /** Each chunk of audio as soon as it is made: the first comes within milliseconds. */
   onAudio?: (samples: Float32Array) => void;
-  /** Each word with its times, in order, as soon as they are known: before it is heard, while
-   *  the audio is made faster than real time. They are the same as the result's `words`. */
+  /** Each word with its times, in order, as soon as nothing still to come can change them: once
+   *  the token after it has its start, or the text has ended. They are the same as the result's
+   *  `words`. With audio made much faster than real time, that is before the word is heard. A
+   *  long word, or a slow device, can make a word arrive after its sound has begun. */
   onWord?: (word: Word) => void;
   signal?: AbortSignal;
 }
@@ -144,10 +147,14 @@ export class Phonon {
   /** Settles when the GPU device is lost (a reset): load again to go on. */
   readonly lost: Promise<unknown>;
 
-  private constructor(engine: PhononEngine, tokenizer: Tokenizer, catalog: Voice[], lost: Promise<unknown>) {
+  /** The voice `speak` uses when none is given: the default of the model's first language. */
+  readonly defaultVoice: string;
+
+  private constructor(engine: PhononEngine, tokenizer: Tokenizer, catalog: Voice[], languages: Language[], lost: Promise<unknown>) {
     this.engine = engine;
     this.tokenizer = tokenizer;
     this.catalog = catalog;
+    this.defaultVoice = DEFAULT_VOICE[languages[0]];
     this.lost = lost;
   }
 
@@ -185,7 +192,7 @@ export class Phonon {
     ]);
     const engine = new PhononEngine(device, blob, { subgroups, align: files.align });
     await engine.ready();
-    return new Phonon(engine, tokenizer, catalog, device.lost);
+    return new Phonon(engine, tokenizer, catalog, files.languages, device.lost);
   }
 
   /** The catalog's voices in the model's languages. */
@@ -211,11 +218,10 @@ export class Phonon {
 
   /** Text to speech, in parts that fit the model, joined. */
   async speak(text: string, options: SpeakOptions = {}): Promise<Speech> {
-    const { voice = "Delia", speed = 1, seed = 1, onAudio, onWord, signal } = options;
+    const { voice = this.defaultVoice, speed = 1, seed = 1, onAudio, onWord, signal } = options;
     const v = this.catalog.find((c) => c.name === voice || c.id === voice);
     if (!v) throw new Error(`No voice ${voice}`);
-    if (!this.engine.hasVoice(v.id)) this.engine.addVoice(v.id, readVoice(await cached(voiceUrl(v.id))));
-    this.engine.setPace(paceForSpeed(speed));
+    const latents = this.engine.hasVoice(v.id) ? undefined : readVoice(await cached(voiceUrl(v.id)));
     const audio: Float32Array[] = [];
     const words: Word[] = [];
     const tokens: Span[] = [];
@@ -233,6 +239,8 @@ export class Phonon {
       const out = await this.engine.synthesize(ids, v.id, {
         seed: seed + i,
         words: part.split(/\s+/).filter(Boolean).length,
+        pace: paceForSpeed(speed),
+        latents,
         onRows: (rows) => times.addRows(rows),
         onChunk: (chunk) => {
           times.addAudio(chunk);
@@ -269,5 +277,5 @@ function subgroups32(adapter: GPUAdapter): boolean {
 }
 
 export { TEXT_MAX } from "./engine";
-export { MODELS, type Language, type ModelId } from "./files";
+export { DEFAULT_VOICE, MODELS, type Language, type ModelId } from "./files";
 export type { Span, Word } from "./timing";

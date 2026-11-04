@@ -39,6 +39,8 @@ export class PhononEngine {
   private readonly stages: GPUBuffer[];
   private readonly rowsAt: number;
   private pace = Number.NaN;
+  /** Settles when the text in progress has drained. */
+  private turn: Promise<unknown> = Promise.resolve();
 
   constructor(
     device: GPUDevice,
@@ -62,8 +64,9 @@ export class PhononEngine {
     return this.g.ready();
   }
 
-  /** Registers a voice by its speaker latents, [125][512]. */
-  addVoice(name: string, latents: Float32Array) {
+  /** Registers a voice by its speaker latents, [125][512]. Its prefill uses the LM's caches, so
+   *  it runs in the queue, before a text (`synthesize`'s `latents`). */
+  private addVoice(name: string, latents: Float32Array) {
     if (latents.length !== PROMPT * H)
       throw new Error(`Voice ${name} has ${latents.length} values`);
     this.voices.set(name, this.lm.voice(latents));
@@ -72,8 +75,9 @@ export class PhononEngine {
     return this.voices.has(name);
   }
 
-  /** The LM's pace (pace.ts): its condition and BOS row are written into the blob. */
-  setPace(delta: number) {
+  /** The LM's pace (pace.ts): its condition and BOS row are written into the blob, so it is set
+   *  in the queue, before a text (`synthesize`'s `pace`). */
+  private setPace(delta: number) {
     if (delta === this.pace) return;
     this.pace = delta;
     const { cond, bos } = paceVectors(this.model.pace, delta);
@@ -89,18 +93,31 @@ export class PhononEngine {
   }
 
   /** Text ids to 24 kHz audio in one voice, in chunks as they are made, with the alignment
-   *  head's scores of each kept frame over the text as they are made. Null when cancelled. */
-  async synthesize(
+   *  head's scores of each kept frame over the text as they are made. Null when cancelled. One
+   *  text at a time: a call waits until the one before has drained, cancelled or not. */
+  synthesize(...args: Parameters<PhononEngine["run"]>): ReturnType<PhononEngine["run"]> {
+    const next = this.turn.then(() => this.run(...args));
+    this.turn = next.catch(() => {});
+    return next;
+  }
+
+  private async run(
     ids: number[],
     voice: string,
     {
       seed = 1,
       words = Infinity,
+      pace = 0,
+      latents,
       cancelled = () => false,
       onChunk,
       onRows,
     }: {
       seed?: number;
+      /** The LM's pace (pace.ts). */
+      pace?: number;
+      /** The voice's speaker latents, [125][512], the first time it is used. */
+      latents?: Float32Array;
       /** The text's words: a short text keeps more frames after the end of speech. */
       words?: number;
       cancelled?: () => boolean;
@@ -110,8 +127,12 @@ export class PhononEngine {
       onRows?: (rows: Float32Array) => void;
     } = {},
   ): Promise<Synthesis | null> {
-    const kv = this.voices.get(voice);
-    if (!kv) throw new Error(`Unknown voice ${voice}`);
+    if (!this.voices.has(voice)) {
+      if (!latents) throw new Error(`Unknown voice ${voice}`);
+      this.addVoice(voice, latents);
+    }
+    const kv = this.voices.get(voice)!;
+    this.setPace(pace);
     if (!ids.length) return { chunks: [] };
     if (ids.length > TEXT_MAX) throw new Error(`Text too long: ${ids.length} tokens`);
     const { device } = this.g;

@@ -17,7 +17,7 @@ export interface Speech {
     tokens: Span[];
 }
 export interface SpeakOptions {
-    /** A catalog voice's name ("Delia") or id. */
+    /** A catalog voice's name ("Delia") or id. The model's `defaultVoice` when not given. */
     voice?: string;
     /** Speaking speed, from about 0.77 to 1.3. */
     speed?: number;
@@ -25,8 +25,10 @@ export interface SpeakOptions {
     seed?: number;
     /** Each chunk of audio as soon as it is made: the first comes within milliseconds. */
     onAudio?: (samples: Float32Array) => void;
-    /** Each word with its times, in order, as soon as they are known: before it is heard, while
-     *  the audio is made faster than real time. They are the same as the result's `words`. */
+    /** Each word with its times, in order, as soon as nothing still to come can change them: once
+     *  the token after it has its start, or the text has ended. They are the same as the result's
+     *  `words`. With audio made much faster than real time, that is before the word is heard. A
+     *  long word, or a slow device, can make a word arrive after its sound has begun. */
     onWord?: (word: Word) => void;
     signal?: AbortSignal;
 }
@@ -37,6 +39,8 @@ export declare class Phonon {
     private readonly catalog;
     /** Settles when the GPU device is lost (a reset): load again to go on. */
     readonly lost: Promise<unknown>;
+    /** The voice `speak` uses when none is given: the default of the model's first language. */
+    readonly defaultVoice: string;
     private constructor();
     /** Loads a model (files.ts MODELS, Phonon 31M by default): a download the first time, then
      *  the browser's cache. `progress` hears the download in percent. */
@@ -57,5 +61,5 @@ export declare class Phonon {
     speak(text: string, options?: SpeakOptions): Promise<Speech>;
 }
 export { TEXT_MAX } from "./engine";
-export { MODELS, type Language, type ModelId } from "./files";
+export { DEFAULT_VOICE, MODELS, type Language, type ModelId } from "./files";
 export type { Span, Word } from "./timing";

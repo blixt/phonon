@@ -833,6 +833,7 @@ function readVoice(buffer) {
 // src/files.ts
 var hubFile = (repo, revision, path) => `https://huggingface.co/${repo}/resolve/${revision}/${path}`;
 var MODEL_CACHE = "phonon-webgpu";
+var DEFAULT_VOICE = { en: "Delia", fr: "Augustin", de: "Mats", es: "Marcos", pt: "Davi" };
 var FORTY_REPO = "blixt/phonon-40m-webgpu";
 var FORTY_REVISION = "dde41aa27ed6bed7c874621d8b17e77dfece21bf";
 var fortyM = (name, revision, languages, align) => ({
@@ -1576,6 +1577,8 @@ var PhononEngine = class {
   stages;
   rowsAt;
   pace = Number.NaN;
+  /** Settles when the text in progress has drained. */
+  turn = Promise.resolve();
   constructor(device, model, { subgroups, align }) {
     this.model = model;
     this.g = new Graph(device, model, subgroups);
@@ -1593,7 +1596,8 @@ var PhononEngine = class {
   ready() {
     return this.g.ready();
   }
-  /** Registers a voice by its speaker latents, [125][512]. */
+  /** Registers a voice by its speaker latents, [125][512]. Its prefill uses the LM's caches, so
+   *  it runs in the queue, before a text (`synthesize`'s `latents`). */
   addVoice(name, latents) {
     if (latents.length !== PROMPT * H2)
       throw new Error(`Voice ${name} has ${latents.length} values`);
@@ -1602,7 +1606,8 @@ var PhononEngine = class {
   hasVoice(name) {
     return this.voices.has(name);
   }
-  /** The LM's pace (pace.ts): its condition and BOS row are written into the blob. */
+  /** The LM's pace (pace.ts): its condition and BOS row are written into the blob, so it is set
+   *  in the queue, before a text (`synthesize`'s `pace`). */
   setPace(delta) {
     if (delta === this.pace) return;
     this.pace = delta;
@@ -1618,16 +1623,29 @@ var PhononEngine = class {
       );
   }
   /** Text ids to 24 kHz audio in one voice, in chunks as they are made, with the alignment
-   *  head's scores of each kept frame over the text as they are made. Null when cancelled. */
-  async synthesize(ids, voice, {
+   *  head's scores of each kept frame over the text as they are made. Null when cancelled. One
+   *  text at a time: a call waits until the one before has drained, cancelled or not. */
+  synthesize(...args) {
+    const next = this.turn.then(() => this.run(...args));
+    this.turn = next.catch(() => {
+    });
+    return next;
+  }
+  async run(ids, voice, {
     seed = 1,
     words = Infinity,
+    pace = 0,
+    latents,
     cancelled = () => false,
     onChunk,
     onRows
   } = {}) {
+    if (!this.voices.has(voice)) {
+      if (!latents) throw new Error(`Unknown voice ${voice}`);
+      this.addVoice(voice, latents);
+    }
     const kv = this.voices.get(voice);
-    if (!kv) throw new Error(`Unknown voice ${voice}`);
+    this.setPace(pace);
     if (!ids.length) return { chunks: [] };
     if (ids.length > TEXT_MAX) throw new Error(`Text too long: ${ids.length} tokens`);
     const { device } = this.g;
@@ -2023,10 +2041,13 @@ var Phonon = class _Phonon {
   catalog;
   /** Settles when the GPU device is lost (a reset): load again to go on. */
   lost;
-  constructor(engine, tokenizer, catalog, lost) {
+  /** The voice `speak` uses when none is given: the default of the model's first language. */
+  defaultVoice;
+  constructor(engine, tokenizer, catalog, languages, lost) {
     this.engine = engine;
     this.tokenizer = tokenizer;
     this.catalog = catalog;
+    this.defaultVoice = DEFAULT_VOICE[languages[0]];
     this.lost = lost;
   }
   /** Loads a model (files.ts MODELS, Phonon 31M by default): a download the first time, then
@@ -2058,7 +2079,7 @@ var Phonon = class _Phonon {
     ]);
     const engine = new PhononEngine(device, blob, { subgroups, align: files.align });
     await engine.ready();
-    return new _Phonon(engine, tokenizer, catalog, device.lost);
+    return new _Phonon(engine, tokenizer, catalog, files.languages, device.lost);
   }
   /** The catalog's voices in the model's languages. */
   get voices() {
@@ -2080,11 +2101,10 @@ var Phonon = class _Phonon {
   }
   /** Text to speech, in parts that fit the model, joined. */
   async speak(text, options = {}) {
-    const { voice = "Delia", speed = 1, seed = 1, onAudio, onWord, signal } = options;
+    const { voice = this.defaultVoice, speed = 1, seed = 1, onAudio, onWord, signal } = options;
     const v = this.catalog.find((c) => c.name === voice || c.id === voice);
     if (!v) throw new Error(`No voice ${voice}`);
-    if (!this.engine.hasVoice(v.id)) this.engine.addVoice(v.id, readVoice(await cached(voiceUrl(v.id))));
-    this.engine.setPace(paceForSpeed(speed));
+    const latents = this.engine.hasVoice(v.id) ? void 0 : readVoice(await cached(voiceUrl(v.id)));
     const audio = [];
     const words = [];
     const tokens = [];
@@ -2101,6 +2121,8 @@ var Phonon = class _Phonon {
       const out = await this.engine.synthesize(ids, v.id, {
         seed: seed + i,
         words: part.split(/\s+/).filter(Boolean).length,
+        pace: paceForSpeed(speed),
+        latents,
         onRows: (rows) => times.addRows(rows),
         onChunk: (chunk) => {
           times.addAudio(chunk);
@@ -2133,6 +2155,7 @@ function subgroups32(adapter) {
   return adapter.features.has("subgroups") && info.subgroupMinSize === 32 && info.subgroupMaxSize === 32;
 }
 export {
+  DEFAULT_VOICE,
   MODELS,
   Phonon,
   TEXT_MAX
