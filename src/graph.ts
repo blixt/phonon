@@ -27,8 +27,9 @@ export interface Align {
   head: number;
 }
 /** Which work returns at once past the end: none, an LM step (its frame) or a codec chunk (its
- *  first frame). */
-export type Gate = "none" | "step" | "chunk";
+ *  first frame). "text" marks a text's prefill, whose rows past the text and its BOS row are
+ *  padding: a backend may skip them, as nothing reads what they make. */
+export type Gate = "none" | "step" | "chunk" | "text";
 /** The two transformers' key and value caches: the LM's at fixed positions, or the codec's, a
  *  ring at the chunk's position over a window, its work gated past the end. */
 export type Cache = { kind: "lm" } | { kind: "codec"; window: number; ring: number };
@@ -140,9 +141,9 @@ export interface Graph<B, O> {
   /** LayerNorm over 512 channels per row, with its affine weights. */
   layernorm(x: B, y: B, rows: number, w: string, b: string, eps: string, gate: Gate): O;
   /** RoPE on the q and k of each row's qkv, q to `q`, k and v to the cache at the row's position. */
-  ropeKV(qkv: B, q: B, kc: B, vc: B, at: Rows, o: { theta: string; cache: Cache }): O;
+  ropeKV(qkv: B, q: B, kc: B, vc: B, at: Rows, o: { theta: string; cache: Cache; gate?: Gate }): O;
   /** Causal (and for the codec windowed) attention of many rows over the cache. */
-  attention(q: B, kc: B, vc: B, out: B, at: Rows, o: { cache: Cache }): O;
+  attention(q: B, kc: B, vc: B, out: B, at: Rows, o: { cache: Cache; gate?: Gate }): O;
   /** An LM step's attention at the state's position, split over the keys: it rotates q and k,
    *  writes k and v to the cache, and leaves each split's unnormalized output, max and sum in
    *  `parts` ([split][head][66]) for a GEMV to merge (Gemv.combine). With `align`, the alignment
@@ -151,7 +152,8 @@ export interface Graph<B, O> {
   /** Frame 0's alignment row: the alignment head's scores of the BOS row (the last text row, at
    *  the state's position) over the text, from the prefill's q. */
   alignRow(q: B, kc: B, al: B, at: Align): O;
-  /** Token ids (u32, `bos` and `pad` past any real one) to embedding rows. */
+  /** Token ids (u32, `bos` and `pad` past any real one) to embedding rows: a text's prefill
+   *  (Gate "text"). */
   embedRows(ids: B, x: B, rows: number, o: { bos: number; pad: number }): O;
   /** The next latent's noise: Box-Muller over a counter hash of the seed and the frame. */
   noise(z: B): O;

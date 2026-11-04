@@ -2,7 +2,7 @@
 // inputs, on WebGPU (gpu.ts) and on the CPU (cpu.ts), and how far apart their outputs are. A
 // kernel that changes on one side only shows here. bench/ops.mjs runs it in headless Chrome.
 import { unpackModel, toF16, type PhononModel } from "../src/checkpoint";
-import { CpuGraph, instantiate, simdLevel, TILES, type Variant } from "../src/cpu";
+import { CpuGraph, instantiate, TILES, type Variant } from "../src/cpu";
 import { GpuGraph } from "../src/gpu";
 import { STATE, type Graph } from "../src/graph";
 
@@ -262,7 +262,8 @@ const cases: Case[] = [
     build: (g, t) => {
       const x = t.f32(64 * H, wave(37));
       const ids = Array.from({ length: 64 }, (_, i) => (i < 30 ? (i * 37) % 4000 : i === 30 ? 0xfffffffe : 0xffffffff));
-      return { ops: [g.embedRows(t.u32(ids), x, 64, { bos: 0xfffffffe, pad: 0xffffffff })], out: [{ name: "x", buf: x, count: 64 * H }] };
+      // The rows past BOS are padding, which a backend may skip.
+      return { ops: [g.embedRows(t.u32(ids), x, 64, { bos: 0xfffffffe, pad: 0xffffffff })], state: { text: 30 }, out: [{ name: "x", buf: x, count: 31 * H }] };
     },
   },
   {
@@ -413,5 +414,5 @@ export async function compareBackends(packed: ArrayBuffer, wasm: Uint8Array<Arra
     }
   }
   device.destroy();
-  return { simd: simdLevel(), subgroups: sg, memory: memory.buffer.byteLength, rows };
+  return { subgroups: sg, memory: memory.buffer.byteLength, rows };
 }

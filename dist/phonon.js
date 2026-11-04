@@ -290,17 +290,17 @@ function rowBuffers(g, rows) {
 }
 function layerRows(g, pre, o) {
   const { B, rows, cache } = o;
-  const gate = cache.kind === "codec" ? "chunk" : "none";
+  const gate = cache.kind === "codec" ? "chunk" : o.text ? "text" : "none";
   const at = { rows, pos0: o.pos0 };
   const kv = [
     g.layernorm(B.x, B.h, rows, `${pre}.ln1.w`, `${pre}.ln1.b`, LN_EPS, gate),
     ...g.gemm(B.h, `${pre}.qkv`, B.qkv, { M: rows, K: H2, N: 3 * H2, gate }),
-    g.ropeKV(B.qkv, B.q, o.kc, o.vc, at, { theta: ROPE_THETA, cache })
+    g.ropeKV(B.qkv, B.q, o.kc, o.vc, at, { theta: ROPE_THETA, cache, gate })
   ];
   if (o.kvOnly) return kv;
   return [
     ...kv,
-    g.attention(B.q, o.kc, o.vc, B.att, at, { cache }),
+    g.attention(B.q, o.kc, o.vc, B.att, at, { cache, gate }),
     ...g.gemm(B.att, `${pre}.o`, B.x, { M: rows, K: H2, N: H2, res: "add", rbuf: B.x, gate }),
     g.layernorm(B.x, B.h, rows, `${pre}.ln2.w`, `${pre}.ln2.b`, LN_EPS, gate),
     ...g.gemm(B.h, `${pre}.fc1`, B.ff, { M: rows, K: H2, N: FF, act: "gelu", gate }),
@@ -390,7 +390,8 @@ var LanguageModel = class {
         vc: this.vc[i],
         cache: { kind: "lm" },
         pos0,
-        kvOnly: !pos0 && i === this.depth - 1
+        kvOnly: !pos0 && i === this.depth - 1,
+        text: pos0 > 0
       }),
       ...pos0 && i === this.alignLayer ? [g.alignRow(this.rows.q, this.kc[i], this.align, this.alignAt)] : []
     ]).flat();
@@ -814,7 +815,8 @@ var { pos: POS, frame: FRAME2, end: END, chunk: CHUNK, text: TEXT, after: AFTER,
 var GATES = {
   none: "",
   step: `if (st[${END}] != 0u && st[${FRAME2}] >= st[${END}]) { return; }`,
-  chunk: `if (st[${END}] != 0u && st[${CHUNK}] / 16u >= st[${END}]) { return; }`
+  chunk: `if (st[${END}] != 0u && st[${CHUNK}] / 16u >= st[${END}]) { return; }`,
+  text: ""
 };
 var BLOB = `
 fn hf(i: u32) -> f32 { let f = unpack2x16float(wv[i >> 3u][(i >> 1u) & 3u]); return select(f.x, f.y, (i & 1u) == 1u); }
@@ -1779,11 +1781,11 @@ var GpuGraph = class {
     );
   }
   ropeKV(qkv, q, kc, vc, at, o) {
-    return this.op(ropeKV(o), [qkv, q, kc, vc, this.state, this.u(UNIFORMS.rows, at)], [at.rows, 1, 1]);
+    return this.op(ropeKV({ theta: o.theta, cache: o.cache }), [qkv, q, kc, vc, this.state, this.u(UNIFORMS.rows, at)], [at.rows, 1, 1]);
   }
   attention(q, kc, vc, out, at, o) {
     return this.op(
-      attention(o),
+      attention({ cache: o.cache }),
       [q, kc, vc, out, this.state, this.u(UNIFORMS.rows, at)],
       [Math.ceil(at.rows / 16), 8, 1]
     );

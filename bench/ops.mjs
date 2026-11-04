@@ -29,16 +29,22 @@ const result = await page.evaluate(async (model) => {
     await cache.put(weights, await fetch(weights));
     hit = await cache.match(weights);
   }
-  const level = WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 15, 1, 13, 0, 65, 0, 253, 15, 65, 0, 253, 15, 253, 128, 2, 11])) ? "relaxed" : "simd";
-  const wasm = new Uint8Array(await (await fetch(`/dist/phonon-cpu-${level}.wasm`)).arrayBuffer());
-  return compareBackends(await hit.arrayBuffer(), wasm);
+  const relaxed = WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 15, 1, 13, 0, 65, 0, 253, 15, 65, 0, 253, 15, 253, 128, 2, 11]));
+  const packed = await hit.arrayBuffer();
+  const out = [];
+  for (const level of relaxed ? ["relaxed", "simd"] : ["simd"]) {
+    const wasm = new Uint8Array(await (await fetch(`/dist/phonon-cpu-${level}.wasm`)).arrayBuffer());
+    const r = await compareBackends(packed, wasm);
+    out.push(...r.rows.map((row) => ({ ...row, build: level, subgroups: r.subgroups })));
+  }
+  return out;
 }, model);
 await ctx.close();
 server.close();
 let failed = 0;
-for (const r of result.rows) {
+for (const r of result) {
   if (!r.ok) failed++;
-  console.log(`${r.ok ? "ok  " : "FAIL"} ${r.case}${r.variant ? ` (${r.variant})` : ""}: ${r.output} (${r.values} values) differs by ${r.diff.toPrecision(3)}, ${(r.rel * 100).toPrecision(3)}% of its largest ${r.max.toPrecision(3)}`);
+  console.log(`${r.ok ? "ok  " : "FAIL"} ${r.build}: ${r.case}${r.variant ? ` (${r.variant})` : ""}: ${r.output} (${r.values} values) differs by ${r.diff.toPrecision(3)}, ${(r.rel * 100).toPrecision(3)}% of its largest ${r.max.toPrecision(3)}`);
 }
-console.log(`${result.rows.length - failed} of ${result.rows.length} outputs agree (CPU build: ${result.simd}, WebGPU subgroups: ${result.subgroups})`);
+console.log(`${result.length - failed} of ${result.length} outputs agree (WebGPU subgroups: ${result[0]?.subgroups})`);
 process.exit(failed ? 1 : 0);

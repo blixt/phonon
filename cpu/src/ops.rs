@@ -34,6 +34,17 @@ pub const SCALE: usize = 7;
 
 pub const GATE_STEP: u32 = 1;
 pub const GATE_CHUNK: u32 = 2;
+pub const GATE_TEXT: u32 = 3;
+
+/** The rows an op computes: in a text's prefill, the text and its BOS row, not the padding. */
+#[inline(always)]
+pub unsafe fn live_rows(rows: usize, gate: u32, st: *const u32) -> usize {
+    if gate == GATE_TEXT {
+        rows.min(*st.add(TEXT) as usize + 1)
+    } else {
+        rows
+    }
+}
 
 #[inline(always)]
 pub unsafe fn w(op: *const u32, k: usize) -> u32 {
@@ -120,7 +131,7 @@ unsafe fn layernorm(op: *const u32, _i: usize, nt: usize) {
     }
     let (x, y) = (wp::<f32>(op, 1), wp::<f32>(op, 2));
     let (g, b) = (wp::<u16>(op, 4), wp::<u16>(op, 5));
-    for r in claimed(wu(op, 3), nt) {
+    for r in claimed(live_rows(wu(op, 3), w(op, 7), wp(op, 8)), nt) {
         let (xr, yr) = (x.add(r * 512), y.add(r * 512));
         let (mean, inv) = moments(xr, wf(op, 6));
         let (m, s) = (f32x4_splat(mean), f32x4_splat(inv));
@@ -131,12 +142,12 @@ unsafe fn layernorm(op: *const u32, _i: usize, nt: usize) {
     }
 }
 
-/// Embedding rows: ids, x, rows, bos, pad, embed, embed scales, bos_embed
+/// Embedding rows: ids, x, rows, bos, pad, embed, embed scales, bos_embed, state
 unsafe fn embed(op: *const u32, _i: usize, nt: usize) {
     let (ids, x) = (wp::<u32>(op, 1), wp::<f32>(op, 2));
     let (bos, pad) = (w(op, 4), w(op, 5));
     let (ew, es, bv) = (wp::<i8>(op, 6), wp::<u16>(op, 7), wp::<u16>(op, 8));
-    for r in claimed(wu(op, 3), nt) {
+    for r in claimed(live_rows(wu(op, 3), GATE_TEXT, wp(op, 9)), nt) {
         let id = *ids.add(r);
         let xr = x.add(r * 512);
         for c in (0..512).step_by(16) {

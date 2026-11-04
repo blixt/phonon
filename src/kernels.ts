@@ -55,6 +55,7 @@ const GATES: Record<Gate, string> = {
   none: "",
   step: `if (st[${END}] != 0u && st[${FRAME}] >= st[${END}]) { return; }`,
   chunk: `if (st[${END}] != 0u && st[${CHUNK}] / 16u >= st[${END}]) { return; }`,
+  text: "",
 };
 
 /** The blob's f16 values: one by half index, or four from a half index that is a multiple of 4. */

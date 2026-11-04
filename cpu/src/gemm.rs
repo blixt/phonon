@@ -36,7 +36,8 @@ pub unsafe fn gemm(op: *const u32, i: usize, nt: usize) {
     if gated(w(op, 17), wp(op, 18)) {
         return;
     }
-    let (m, k, n) = (wu(op, 5), wu(op, 6), wu(op, 7));
+    let (k, n) = (wu(op, 6), wu(op, 7));
+    let m = live_rows(wu(op, 5), w(op, 17), wp(op, 18));
     let load = w(op, 14);
     let convt = load == CONVT;
     let phases = if convt { wu(op, 16) } else { 1 };

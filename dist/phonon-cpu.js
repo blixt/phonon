@@ -104,17 +104,17 @@ function rowBuffers(g, rows) {
 }
 function layerRows(g, pre, o) {
   const { B, rows, cache } = o;
-  const gate = cache.kind === "codec" ? "chunk" : "none";
+  const gate = cache.kind === "codec" ? "chunk" : o.text ? "text" : "none";
   const at = { rows, pos0: o.pos0 };
   const kv = [
     g.layernorm(B.x, B.h, rows, `${pre}.ln1.w`, `${pre}.ln1.b`, LN_EPS, gate),
     ...g.gemm(B.h, `${pre}.qkv`, B.qkv, { M: rows, K: H2, N: 3 * H2, gate }),
-    g.ropeKV(B.qkv, B.q, o.kc, o.vc, at, { theta: ROPE_THETA, cache })
+    g.ropeKV(B.qkv, B.q, o.kc, o.vc, at, { theta: ROPE_THETA, cache, gate })
   ];
   if (o.kvOnly) return kv;
   return [
     ...kv,
-    g.attention(B.q, o.kc, o.vc, B.att, at, { cache }),
+    g.attention(B.q, o.kc, o.vc, B.att, at, { cache, gate }),
     ...g.gemm(B.att, `${pre}.o`, B.x, { M: rows, K: H2, N: H2, res: "add", rbuf: B.x, gate }),
     g.layernorm(B.x, B.h, rows, `${pre}.ln2.w`, `${pre}.ln2.b`, LN_EPS, gate),
     ...g.gemm(B.h, `${pre}.fc1`, B.ff, { M: rows, K: H2, N: FF, act: "gelu", gate }),
@@ -204,7 +204,8 @@ var LanguageModel = class {
         vc: this.vc[i],
         cache: { kind: "lm" },
         pos0,
-        kvOnly: !pos0 && i === this.depth - 1
+        kvOnly: !pos0 && i === this.depth - 1,
+        text: pos0 > 0
       }),
       ...pos0 && i === this.alignLayer ? [g.alignRow(this.rows.q, this.kc[i], this.align, this.alignAt)] : []
     ]).flat();
@@ -355,18 +356,18 @@ var FIELDS = {
   gemv: ["x", "xo", "w", "ws", "y", "K", "N", "act", "bias", "res", "r", "g", "go", "v", "ln", "lnw", "lnb", "eps", "mod", "so", "ho", "splits", "parts", "state"],
   gemm: ["x", "w", "ws", "y", "M", "K", "N", "act", "bias", "res", "r", "yo", "ro", "load", "cin", "stride", "gate", "state"],
   layernorm: ["x", "y", "rows", "w", "b", "eps", "gate", "state"],
-  rope: ["qkv", "q", "kc", "vc", "rows", "pos0", "freqs", "codec", "ring", "state", "table", "tableRows"],
-  attention: ["q", "kc", "vc", "out", "rows", "pos0", "codec", "window", "ring", "state"],
+  rope: ["qkv", "q", "kc", "vc", "rows", "pos0", "freqs", "codec", "ring", "state", "table", "tableRows", "gate"],
+  attention: ["q", "kc", "vc", "out", "rows", "pos0", "codec", "window", "ring", "state", "gate"],
   attnStep: ["qkv", "kc", "vc", "parts", "splits", "freqs", "align", "al", "lo", "width", "head", "state", "table", "tableRows"],
   alignRow: ["q", "kc", "al", "lo", "head", "state"],
-  embed: ["ids", "x", "rows", "bos", "pad", "w", "ws", "bosv"],
+  embed: ["ids", "x", "rows", "bos", "pad", "w", "ws", "bosv", "state"],
   noise: ["z", "state"],
   finish: ["x", "lat", "lats", "state", "ew", "eb", "nw", "nb", "eps", "threshold"],
   upsample: ["lats", "y", "T", "w", "ws", "mean", "std", "state"],
   elu: ["src", "dst", "count", "gate", "state"]
 };
 var ACT = { none: 0, gelu: 1, silu: 2 };
-var GATE = { none: 0, step: 1, chunk: 2 };
+var GATE = { none: 0, step: 1, chunk: 2, text: 3 };
 var LOAD = { linear: 0, conv: 1, convT: 2 };
 var PAGE = 65536;
 var SCRATCH_PER = 256 * 1024;
@@ -797,7 +798,8 @@ var CpuGraph = class {
       ...this.rope(o.theta),
       codec: codec ? 1 : 0,
       ring: o.cache.kind === "codec" ? o.cache.ring : 0,
-      state: this.state.ptr
+      state: this.state.ptr,
+      gate: GATE[o.gate ?? "none"]
     });
   }
   attention(q, kc, vc, out, at, o) {
@@ -812,7 +814,8 @@ var CpuGraph = class {
       codec: c.kind === "codec" ? 1 : 0,
       window: c.kind === "codec" ? c.window : 0,
       ring: c.kind === "codec" ? c.ring : 0,
-      state: this.state.ptr
+      state: this.state.ptr,
+      gate: GATE[o.gate ?? "none"]
     });
   }
   attnStep(qkv, kc, vc, parts, o) {
@@ -835,7 +838,7 @@ var CpuGraph = class {
     return this.desc("alignRow", { q: q.ptr, kc: kc.ptr, al: al.ptr, lo: at.lo, head: at.head, state: this.state.ptr });
   }
   embedRows(ids, x, rows, o) {
-    return this.desc("embed", { ids: ids.ptr, x: x.ptr, rows, bos: o.bos, pad: o.pad, ...this.q8("embed"), bosv: this.half("bos_embed") });
+    return this.desc("embed", { ids: ids.ptr, x: x.ptr, rows, bos: o.bos, pad: o.pad, ...this.q8("embed"), bosv: this.half("bos_embed"), state: this.state.ptr });
   }
   noise(z) {
     return this.desc("noise", { z: z.ptr, state: this.state.ptr });

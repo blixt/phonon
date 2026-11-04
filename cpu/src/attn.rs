@@ -45,7 +45,7 @@ unsafe fn rotate(x: *const f32, cs: *const f32, k: f32, out: *mut f32) {
     }
 }
 
-/// RoPE of rows: qkv, q, kc, vc, rows, pos0, freqs, codec, ring, state, table, table rows
+/// RoPE of rows: qkv, q, kc, vc, rows, pos0, freqs, codec, ring, state, table, table rows, gate
 pub unsafe fn rope(op: *const u32, i: usize, nt: usize) {
     let st = wp::<u32>(op, 10);
     let codec = w(op, 8) != 0;
@@ -56,7 +56,7 @@ pub unsafe fn rope(op: *const u32, i: usize, nt: usize) {
     let at = if codec { *st.add(CHUNK) as usize } else { 0 };
     let ring = wu(op, 9);
     let cs = scratch(i) as *mut f32;
-    for m in claimed(wu(op, 5), nt) {
+    for m in claimed(live_rows(wu(op, 5), w(op, 13), st), nt) {
         let pos = wu(op, 6) + at + m;
         let slot = if codec { pos % ring } else { pos };
         angles(pos, wp(op, 7), wp(op, 11), wu(op, 12), cs);
@@ -138,7 +138,7 @@ unsafe fn softmax_values(
     (mx, sum)
 }
 
-/// Causal attention of many rows: q, kc, vc, out, rows, pos0, codec, window, ring, state
+/// Causal attention of many rows: q, kc, vc, out, rows, pos0, codec, window, ring, state, gate
 pub unsafe fn attention(op: *const u32, i: usize, nt: usize) {
     let st = wp::<u32>(op, 10);
     let codec = w(op, 7) != 0;
@@ -149,7 +149,7 @@ pub unsafe fn attention(op: *const u32, i: usize, nt: usize) {
     let (window, ring) = (wu(op, 8), wu(op, 9));
     let base = wu(op, 6) + if codec { *st.add(CHUNK) as usize } else { 0 };
     let sc = scratch(i) as *mut f32;
-    for t in claimed(wu(op, 5) * 8, nt) {
+    for t in claimed(live_rows(wu(op, 5), w(op, 11), st) * 8, nt) {
         let (m, h) = (t / 8, t % 8);
         let pos = base + m;
         let lo = if window > 0 && pos + 1 > window { pos + 1 - window } else { 0 };

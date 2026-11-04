@@ -54,20 +54,22 @@ export function layerRows<B, O>(
     /** A voice's last layer needs only its keys and values. */
     kvOnly?: boolean;
     out?: { buf: B; yo: number };
+    /** A text's prefill: rows past the text and BOS are padding. */
+    text?: boolean;
   },
 ): O[] {
   const { B, rows, cache } = o;
-  const gate = cache.kind === "codec" ? "chunk" : "none";
+  const gate = cache.kind === "codec" ? "chunk" : o.text ? "text" : "none";
   const at = { rows, pos0: o.pos0 };
   const kv = [
     g.layernorm(B.x, B.h, rows, `${pre}.ln1.w`, `${pre}.ln1.b`, LN_EPS, gate),
     ...g.gemm(B.h, `${pre}.qkv`, B.qkv, { M: rows, K: H, N: 3 * H, gate }),
-    g.ropeKV(B.qkv, B.q, o.kc, o.vc, at, { theta: ROPE_THETA, cache }),
+    g.ropeKV(B.qkv, B.q, o.kc, o.vc, at, { theta: ROPE_THETA, cache, gate }),
   ];
   if (o.kvOnly) return kv;
   return [
     ...kv,
-    g.attention(B.q, o.kc, o.vc, B.att, at, { cache }),
+    g.attention(B.q, o.kc, o.vc, B.att, at, { cache, gate }),
     ...g.gemm(B.att, `${pre}.o`, B.x, { M: rows, K: H, N: H, res: "add", rbuf: B.x, gate }),
     g.layernorm(B.x, B.h, rows, `${pre}.ln2.w`, `${pre}.ln2.b`, LN_EPS, gate),
     ...g.gemm(B.h, `${pre}.fc1`, B.ff, { M: rows, K: H, N: FF, act: "gelu", gate }),
@@ -161,6 +163,7 @@ export class LanguageModel<B, O> {
         cache: { kind: "lm" },
         pos0,
         kvOnly: !pos0 && i === this.depth - 1,
+        text: pos0 > 0,
       }),
       ...(pos0 && i === this.alignLayer ? [g.alignRow(this.rows.q, this.kc[i], this.align, this.alignAt)] : []),
     ]).flat();

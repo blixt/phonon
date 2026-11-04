@@ -331,12 +331,12 @@ export class GpuGraph implements G.Graph<GPUBuffer, Op> {
   }
 
   ropeKV(qkv: GPUBuffer, q: GPUBuffer, kc: GPUBuffer, vc: GPUBuffer, at: G.Rows, o: { theta: string; cache: G.Cache }): Op {
-    return this.op(K.ropeKV(o), [qkv, q, kc, vc, this.state, this.u(K.UNIFORMS.rows, at)], [at.rows, 1, 1]);
+    return this.op(K.ropeKV({ theta: o.theta, cache: o.cache }), [qkv, q, kc, vc, this.state, this.u(K.UNIFORMS.rows, at)], [at.rows, 1, 1]);
   }
 
   attention(q: GPUBuffer, kc: GPUBuffer, vc: GPUBuffer, out: GPUBuffer, at: G.Rows, o: { cache: G.Cache }): Op {
     return this.op(
-      K.attention(o),
+      K.attention({ cache: o.cache }),
       [q, kc, vc, out, this.state, this.u(K.UNIFORMS.rows, at)],
       [Math.ceil(at.rows / 16), 8, 1],
     );
