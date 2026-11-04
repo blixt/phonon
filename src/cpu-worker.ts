@@ -68,7 +68,7 @@ async function load(m: Extract<ToWorker, { type: "load" }>) {
   const url = new URL(`./phonon-cpu-${level}.wasm`, import.meta.url);
   const model = unpackModel(m.packed);
   const wasm = new Uint8Array(await (await fetch(url)).arrayBuffer());
-  const { module, memory, exports: x } = await instantiate(wasm, shared, model.blob.byteLength + 96 * 2 ** 20);
+  const { module, memory, exports: x } = await instantiate(wasm, shared, model.blob.byteLength + 64 * 2 ** 20);
   // Pool threads' stacks first, then everything cpu.ts lays out.
   const base = Math.ceil((x.__heap_base.value as number) / 64) * 64;
   const threads = shared ? await startPool({ module, memory }, import.meta.url, m.threads, base) : 1;

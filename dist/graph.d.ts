@@ -1,101 +1,192 @@
-import * as K from "./kernels";
-import type { Tensor } from "./checkpoint";
-interface Pipe {
-    layout: GPUBindGroupLayout;
-    pipeline: GPUComputePipeline | null;
+export type Act = "none" | "gelu" | "silu";
+/** none | add (y = r + acc) | add_y (y += acc) | gate (y = r + g * acc) |
+ *  gate_y (y += g * acc) | vec (y = acc + v, v from the blob) */
+export type Residual = "none" | "add" | "add_y" | "gate" | "gate_y" | "vec";
+/** The state buffer's u32 slots: the position the next LM step feeds, the frame it makes, the
+ *  frames to keep once the end of speech is seen (0 before), the first 200 Hz position of the
+ *  codec's chunk, the text's length in tokens, and the frames to keep after the end-of-speech
+ *  frame, then the noise seed and its f32 scale (stored as u32 bits). */
+export declare const STATE: {
+    readonly pos: 0;
+    readonly frame: 1;
+    readonly end: 2;
+    readonly chunk: 3;
+    readonly text: 4;
+    readonly after: 5;
+    readonly seed: 6;
+    readonly scale: 7;
+};
+/** Where the alignment head's scores go: one row per frame over the text tokens, which start
+ *  at position `lo`, `width` floats per row. */
+export interface Align {
+    lo: number;
+    width: number;
+    head: number;
 }
-export interface Op {
-    pipe: Pipe;
-    bindGroup: GPUBindGroup;
-    groups: [number, number, number];
+/** Which work returns at once past the end: none, an LM step (its frame) or a codec chunk (its
+ *  first frame). "text" marks a text's prefill, whose rows past the text and its BOS row are
+ *  padding: a backend may skip them, as nothing reads what they make. */
+export type Gate = "none" | "step" | "chunk" | "text";
+/** The two transformers' key and value caches: the LM's at fixed positions, or the codec's, a
+ *  ring at the chunk's position over a window, its work gated past the end. */
+export type Cache = {
+    kind: "lm";
+} | {
+    kind: "codec";
+    window: number;
+    ring: number;
+};
+/** int8 weights per f16 scale. */
+export declare const Q8_GROUP = 32;
+export interface ConvShape {
+    cin: number;
+    k?: number;
+    dil?: number;
+    /** ELU on the input as it is read. */
+    elu?: boolean;
+    /** Transposed convolutions: the stride, one GEMM per output phase. */
+    stride?: number;
 }
-export type Binding = GPUBuffer | GPUBufferBinding;
-export declare function encode(enc: GPUCommandEncoder, ops: Op[]): void;
-export declare class Graph {
-    readonly device: GPUDevice;
-    readonly weights: GPUBuffer;
-    /** The LM's and codec's state, slots as kernels.ts STATE names them. */
-    readonly state: GPUBuffer;
-    /** Bound where a kernel's binding goes unused. */
-    readonly zero: GPUBuffer;
-    /** 32-lane subgroups for the GEMV sums. */
-    readonly sg: boolean;
-    private readonly tensors;
-    private readonly pipes;
-    private readonly compiling;
-    private scratchBuf;
-    constructor(device: GPUDevice, model: {
-        blob: Uint8Array<ArrayBuffer>;
-        tensors: Record<string, Tensor>;
-    }, sg: boolean);
-    buffer(size: number, data?: ArrayBufferView<ArrayBuffer>): GPUBuffer;
-    /** A uniform of a kernel's `fields` (kernels.ts UNIFORMS), 0 where `values` has none. */
-    u<F extends K.Fields>(fields: F, values: Partial<Record<F[number], number>>): GPUBuffer;
-    private tensor;
-    /** An f16 tensor's offset in halves. */
-    half(name: string): number;
-    /** A tensor's offset in u32 words, and its scales' offset in halves (int8 only). */
-    words(name: string): {
-        wo: number;
-        wso: number;
-        q8: boolean;
+/** y = epilogue(W x) for one row (x at element `xo`), optionally normalizing x first. */
+export interface Gemv<B> {
+    K: number;
+    N: number;
+    xo?: number;
+    act?: Act;
+    bias?: string;
+    res?: Residual;
+    rbuf?: B;
+    /** gate: y = r + g[go + n] * acc, g in `gbuf` */
+    gbuf?: B;
+    go?: number;
+    /** vec: y = acc + the blob's tensor `vname` */
+    vname?: string;
+    /** LayerNorm over 512 values, with affine weights (w, b) and/or the adaLN modulation in `mod`
+     *  (shift at `ho`, scale at `so`). */
+    ln?: {
+        w?: string;
+        b?: string;
+        eps: string;
+        mod?: B;
+        so?: number;
+        ho?: number;
     };
-    /** An int8 tensor's offsets, for the kernels that only read int8. */
-    q8(name: string): {
-        wo: number;
-        wso: number;
-        q8: boolean;
+    /** The input is this many attention splits in `parts` (attnStep), merged. */
+    combine?: {
+        splits: number;
+        parts: B;
     };
-    /** Settles when every pipeline built so far has compiled. */
+}
+/** Y = epilogue(X W^T) over M rows: a linear layer, a convolution or a transposed one. A
+ *  convolution reads its input from row 0, where its (k - 1) * dil rows of left context begin.
+ *  A transposed one reads one row of context and runs one GEMM per output phase. */
+export interface Gemm<B> {
+    M: number;
+    K: number;
+    N: number;
+    gate: Gate;
+    act?: Act;
+    bias?: string;
+    res?: Residual;
+    rbuf?: B;
+    /** Output and residual offsets, in elements. */
+    yo?: number;
+    ro?: number;
+    load?: "linear" | "conv" | "convT";
+    conv?: ConvShape;
+}
+/** Rows of a transformer op: row m sits at position pos0 + m, past the cache's own position
+ *  (the codec's chunk). */
+export interface Rows {
+    rows: number;
+    pos0: number;
+}
+/** A codec stage: `ctx` rows of left context, then `rate` rows per 200 Hz position. */
+export interface Stage<B> {
+    ctx: number;
+    rate: number;
+    ch: number;
+    buf: B;
+}
+/** A buffer the engine reads results from once a submit is done. */
+export interface Staging {
+    /** Starts the read of everything submitted so far. */
+    map(): Promise<void>;
+    /** The bytes, after `map` settles. */
+    range(): ArrayBuffer;
+    unmap(): void;
+}
+/** Commands, run in order when submitted. */
+export interface Encoder<B, O> {
+    run(ops: O[]): void;
+    copy(src: B, srcOffset: number, dst: B, dstOffset: number, bytes: number): void;
+    clear(buf: B, offset: number, bytes: number): void;
+    read(src: B, srcOffset: number, dst: Staging, dstOffset: number, bytes: number): void;
+    submit(): void;
+}
+export interface Graph<B, O> {
+    /** The weight blob. */
+    readonly weights: B;
+    readonly state: B;
+    /** Submits the engine keeps in flight. */
+    readonly depth: number;
+    /** Bytes per value of the LM's key and value cache. */
+    readonly kvBytes: number;
+    buffer(bytes: number): B;
+    /** Bytes into a buffer, before the next submit. */
+    write(buf: B, offset: number, data: ArrayBufferView<ArrayBuffer>): void;
+    encoder(): Encoder<B, O>;
+    staging(bytes: number): Staging;
+    /** Settles when every op built so far can run. */
     ready(): Promise<void>;
-    op(code: string, bindings: Binding[], groups: [number, number, number]): Op;
-    /** Split-K partials. Dispatches run in order, so every GEMM's partials share one buffer. */
-    private scratch;
-    /** y = epilogue(W x) for one row (x at element `xo`), optionally normalizing x first.
-     *  A step's work, so it returns at once past the end. */
-    gemv(x: GPUBuffer, wname: string, ybuf: GPUBuffer, o: {
-        K: number;
-        N: number;
-        xo?: number;
-        act?: K.Act;
-        bias?: string;
-        res?: K.Residual;
-        rbuf?: GPUBuffer;
-        /** gate: y += g[go + n] * acc, g in `gbuf` */
-        gbuf?: GPUBuffer;
-        go?: number;
-        /** vec: y = acc + the blob's tensor `vname` */
-        vname?: string;
-        ln?: {
-            w?: string;
-            b?: string;
-            eps: string;
-            mod?: GPUBuffer;
-            so?: number;
-            ho?: number;
+    /** An LM step's matrix-vector product with int8 weights: a step's work, gated. */
+    gemv(x: B | null, w: string, y: B, o: Gemv<B>): O;
+    gemm(x: B, w: string, y: B, o: Gemm<B>): O[];
+    /** LayerNorm over 512 channels per row, with its affine weights. */
+    layernorm(x: B, y: B, rows: number, w: string, b: string, eps: string, gate: Gate): O;
+    /** RoPE on the q and k of each row's qkv, q to `q`, k and v to the cache at the row's position. */
+    ropeKV(qkv: B, q: B, kc: B, vc: B, at: Rows, o: {
+        theta: string;
+        cache: Cache;
+        gate?: Gate;
+    }): O;
+    /** Causal (and for the codec windowed) attention of many rows over the cache. */
+    attention(q: B, kc: B, vc: B, out: B, at: Rows, o: {
+        cache: Cache;
+        gate?: Gate;
+    }): O;
+    /** An LM step's attention at the state's position, split over the keys: it rotates q and k,
+     *  writes k and v to the cache, and leaves each split's unnormalized output, max and sum in
+     *  `parts` ([split][head][66]) for a GEMV to merge (Gemv.combine). With `align`, the alignment
+     *  head's scores over the text go to the row of the state's frame. */
+    attnStep(qkv: B, kc: B, vc: B, parts: B, o: {
+        splits: number;
+        theta: string;
+        align?: {
+            at: Align;
+            buf: B;
         };
-        /** Merge this many attention splits from `parts` as the input. */
-        combine?: {
-            splits: number;
-            parts: GPUBuffer;
-        };
-    }): Op;
-    /** Y = epilogue(X W^T) over M rows: a linear layer, a convolution or a transposed one. */
-    gemm(xbuf: GPUBuffer, wname: string, ybuf: GPUBuffer, o: {
-        M: number;
-        K: number;
-        N: number;
-        gate: K.Gate;
-        act?: K.Act;
-        bias?: string;
-        res?: K.Residual;
-        rbuf?: GPUBuffer;
-        /** Output and residual offsets, in elements. */
-        yo?: number;
-        ro?: number;
-        load?: "linear" | "conv" | "convT";
-        conv?: K.ConvShape;
-    }): Op[];
-    layernorm(x: GPUBuffer, y: GPUBuffer, rows: number, w: string, b: string, eps: string, gate: K.Gate): Op;
+    }): O;
+    /** Frame 0's alignment row: the alignment head's scores of the BOS row (the last text row, at
+     *  the state's position) over the text, from the prefill's q. */
+    alignRow(q: B, kc: B, al: B, at: Align): O;
+    /** Token ids (u32, `bos` and `pad` past any real one) to embedding rows: a text's prefill
+     *  (Gate "text"). */
+    embedRows(ids: B, x: B, rows: number, o: {
+        bos: number;
+        pad: number;
+    }): O;
+    /** The next latent's noise: Box-Muller over a counter hash of the seed and the frame. */
+    noise(z: B): O;
+    /** The end of an LM step: the EOS logit from LN(x row 0), the latent kept, the position and
+     *  frame moved on, and the end set once the logit passes `threshold`. */
+    finishStep(x: B, lat: B, lats: B, o: {
+        eps: string;
+        threshold: string;
+    }): O;
+    /** The codec's input: latents denormalized, projected and upsampled ×16 for the chunk at the
+     *  state's codec position. */
+    upsample(lats: B, y: B, T: number): O;
+    /** Every stage's last `ctx` rows of a chunk of T positions to its front. */
+    shiftRows(stages: Stage<B>[], T: number): O;
 }
-export {};

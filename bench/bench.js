@@ -43,11 +43,17 @@ const RUNTIMES = {
   async oursCpu1() {
     return oursCpu(1);
   },
+  async oursCpu3() {
+    return oursCpu(3);
+  },
   async gradiumWebgpu() {
     return gradium("webgpu");
   },
   async gradiumCpu() {
     return gradium("cpu");
+  },
+  async gradiumCpu1() {
+    return gradium("cpu", PHONON, 1);
   },
   async gradiumWebgpuMultilingual() {
     return gradium("webgpu", PHONON_MULTILINGUAL);
@@ -77,10 +83,10 @@ async function oursCpu(threads) {
     speak: async (text, first, seed) => (await tts.speak(text, { voice: "Delia", seed, onAudio: first })).audio,
   };
 }
-async function gradium(where, model = PHONON) {
+async function gradium(where, model = PHONON, threads = "auto") {
   const { PhononTTS } = await import("../node_modules/phonon-tts/index.js");
   // No text normalization: this engine has none, so both do the same work.
-  const tts = await PhononTTS.load({ lang: "none", model, device: where, quant: "q8" });
+  const tts = await PhononTTS.load({ lang: "none", model, device: where, quant: "q8", threads });
   await tts.addVoice("Delia", `${VOICE_REPO}/voices/nGzMHMPAWGaJFHOo.safetensors`);
   return {
     info: `${tts.device}, ${tts.threads} threads (${tts.threadsReason || tts.deviceReason})`,

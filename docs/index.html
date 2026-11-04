@@ -54,6 +54,7 @@
 <li>The speaking speed goes from about 0.77× to 1.3×.</li>
 <li>It downloads Gradium&#39;s weights with the large matrices converted to 8-bit integers (43.7 MB, <a href="https://huggingface.co/blixt/phonon-31m-en-webgpu">on Hugging Face</a>) and keeps them in the browser&#39;s cache.</li>
 <li>It runs in Chrome on macOS and Windows and in Safari on iOS, and a user ran it in Firefox on a Pixel 10 Pro. Other browsers are not tested.</li>
+<li>Without WebGPU it runs on the CPU, in WebAssembly (<a href="#the-cpu-tier">The CPU tier</a>). On the benchmark&#39;s sentences it makes the same take as WebGPU, with the same word times. On an M3 Max it makes speech 37 times faster than real time on 8 threads and 7 times on one, against 11 and 6 times for phonon-tts on the CPU on 3 threads and one.</li>
 </ul>
 <p>Against Gradium&#39;s own browser package, <a href="https://www.npmjs.com/package/phonon-tts">phonon-tts</a>, on WebGPU, with Phonon 31M:</p>
 <ul>
@@ -229,8 +230,8 @@ const speech = await tts.speak(&quot;The birch canoe slid on the smooth planks.&
 // speech.tokens: every token&#39;s time
 </code></pre>
 <p><code>onWord</code> gives the same words as <code>speech.words</code>, as soon as nothing still to come can change them. <code>tts.words(text)</code> lists the words and their tokens before speaking, so a page can lay them out first. The demo does that, and lights each word token by token while it is heard, so a long compound like &quot;Donaudampfschifffahrtsgesellschaft&quot; lights in pieces.</p>
-<p><code>Phonon.load</code> throws when the browser has no WebGPU. The first load downloads 44.3 MB from Hugging Face (the weights, the tokenizer and a voice), and later loads read them from the browser&#39;s cache.</p>
-<p>The code is in <a href="https://github.com/blixt/phonon/tree/main/src">src</a>: <a href="https://github.com/blixt/phonon/blob/main/src/kernels.ts">kernels.ts</a> has the WGSL shaders, <a href="https://github.com/blixt/phonon/blob/main/src/lm.ts">lm.ts</a> the language model, <a href="https://github.com/blixt/phonon/blob/main/src/codec.ts">codec.ts</a> the audio decoder, <a href="https://github.com/blixt/phonon/blob/main/src/engine.ts">engine.ts</a> the loop that drives them and <a href="https://github.com/blixt/phonon/blob/main/src/timing.ts">timing.ts</a> the word times.</p>
+<p><code>Phonon.load</code> runs on WebGPU when the browser gives it an adapter, and otherwise on the CPU, in a worker. <code>backend: &quot;webgpu&quot;</code> or <code>&quot;cpu&quot;</code> picks one, and <code>tts.backend</code> says which runs (on the CPU, with its threads and its WebAssembly build). The CPU uses threads only on a cross-origin isolated page, one served with <code>Cross-Origin-Opener-Policy: same-origin</code> and <code>Cross-Origin-Embedder-Policy: require-corp</code>. Elsewhere it runs on one thread. <code>threads</code> sets how many, and by default it is one per core, at most 8. The first load downloads 44.3 MB from Hugging Face (the weights, the tokenizer and a voice), and later loads read them from the browser&#39;s cache. The CPU tier adds 26 KB (gzip) of its own code and WebAssembly, which loads only when it runs.</p>
+<p>The code is in <a href="https://github.com/blixt/phonon/tree/main/src">src</a>: <a href="https://github.com/blixt/phonon/blob/main/src/lm.ts">lm.ts</a> has the language model and <a href="https://github.com/blixt/phonon/blob/main/src/codec.ts">codec.ts</a> the audio decoder, as ops of a backend (<a href="https://github.com/blixt/phonon/blob/main/src/graph.ts">graph.ts</a>). <a href="https://github.com/blixt/phonon/blob/main/src/gpu.ts">gpu.ts</a> runs those ops on WebGPU with the WGSL shaders of <a href="https://github.com/blixt/phonon/blob/main/src/kernels.ts">kernels.ts</a>, and <a href="https://github.com/blixt/phonon/blob/main/src/cpu.ts">cpu.ts</a> runs them in WebAssembly, with the Rust kernels of <a href="https://github.com/blixt/phonon/tree/main/cpu">cpu</a>. <a href="https://github.com/blixt/phonon/blob/main/src/engine.ts">engine.ts</a> is the loop that drives either, and <a href="https://github.com/blixt/phonon/blob/main/src/timing.ts">timing.ts</a> makes the word times.</p>
 </div></section>
 <section class="doc" id="other-models"><div><h2>Other models</h2></div><div class="body"><p>Gradium also publishes six Phonon 40M models. They have 9 language-model layers where Phonon 31M has 6, and they are under <a href="https://creativecommons.org/licenses/by-nc/4.0/">CC BY-NC 4.0</a>, which does not allow commercial use. blixt/phonon runs all of them, from conversions in <a href="https://huggingface.co/blixt/phonon-40m-webgpu">blixt/phonon-40m-webgpu</a> (53.7 MB each), and the <a href="#demo">demo</a> has them in its model menu.</p>
 <div class="table"><table>
@@ -322,9 +323,9 @@ const speech = await tts.speak(&quot;Le petit chat dort au soleil près de la fe
 </tr>
 </tbody></table></div>
 </div></section>
-<section class="doc" id="how-it-works"><div><h2>How it works</h2><ul class="toc"><li><a href="#starting-point">Starting point</a></li><li><a href="#weights">Weights</a></li><li><a href="#speed">Speed</a></li><li><a href="#word-timings">Word timings</a></li><li><a href="#sampling">Sampling</a></li><li><a href="#failed-experiments">Failed experiments</a></li><li><a href="#benchmark-notes">Benchmark notes</a></li><li><a href="#open-work">Open work</a></li></ul></div><div class="body"><p>Everything here goes beyond what the model card and the phonon-tts source say. &quot;The reference&quot; is the PyTorch model in Hugging Face Transformers (<code>GradiumPhononTTSForConditionalGeneration</code>), and the baseline is phonon-tts 0.6.0. Numbers marked (A/B) are the effect of one technique, measured with and without it on the M3 Max in headless Chrome. They are not from the benchmark above.</p>
+<section class="doc" id="how-it-works"><div><h2>How it works</h2><ul class="toc"><li><a href="#starting-point">Starting point</a></li><li><a href="#weights">Weights</a></li><li><a href="#speed">Speed</a></li><li><a href="#the-cpu-tier">The CPU tier</a></li><li><a href="#word-timings">Word timings</a></li><li><a href="#sampling">Sampling</a></li><li><a href="#failed-experiments">Failed experiments</a></li><li><a href="#benchmark-notes">Benchmark notes</a></li><li><a href="#open-work">Open work</a></li></ul></div><div class="body"><p>Everything here goes beyond what the model card and the phonon-tts source say. &quot;The reference&quot; is the PyTorch model in Hugging Face Transformers (<code>GradiumPhononTTSForConditionalGeneration</code>), and the baseline is phonon-tts 0.6.0. Numbers marked (A/B) are the effect of one technique, measured with and without it on the M3 Max in headless Chrome. They are not from the benchmark above.</p>
 <h3 id="starting-point">Starting point</h3>
-<p>The engine is new code: WGSL compute shaders and TypeScript, with no phonon-tts, ONNX Runtime or WebAssembly inside. <a href="https://github.com/blixt/phonon/blob/main/bench/parity.py">bench/parity.py</a> checks the engine against the reference. It runs the reference in f32 with the engine&#39;s own noise in place of <code>torch.randn</code>, so both should make the same take of each text. On the 11 benchmark texts in the voice Delia, all 11 came out the same length to the frame (the Rainbow passage is 349 frames). The log-mel distance from the reference was 2.6 dB on average, and the waveforms correlated at 0.51. For scale, the reference with a different seed was 9.5 dB away, correlated at 0.21, and had a different length in 6 of the 11 texts. The waveforms are not identical, because int8 weights and an f16 key/value cache change the fine detail of each frame.</p>
+<p>The engine is new code: WGSL compute shaders, TypeScript and, for the CPU, Rust compiled to WebAssembly, with no phonon-tts or ONNX Runtime inside. <a href="https://github.com/blixt/phonon/blob/main/bench/parity.py">bench/parity.py</a> checks the engine against the reference. It runs the reference in f32 with the engine&#39;s own noise in place of <code>torch.randn</code>, so both should make the same take of each text. On the 11 benchmark texts in the voice Delia, all 11 came out the same length to the frame (the Rainbow passage is 349 frames). The log-mel distance from the reference was 2.6 dB on average, and the waveforms correlated at 0.51. For scale, the reference with a different seed was 9.5 dB away, correlated at 0.21, and had a different length in 6 of the 11 texts. The waveforms are not identical, because int8 weights and an f16 key/value cache change the fine detail of each frame.</p>
 <p>The tokenizer must be <code>tokenizer.5.0.0.json</code>, not <code>tokenizer.json</code>. Only the first has the 191 normalizer rules the model expects, which, for example, turn brackets into commas and add a final period. <a href="https://github.com/blixt/phonon/blob/main/src/tokenizer.ts">tokenizer.ts</a> runs those rules, Metaspace splitting and a Unigram Viterbi search with byte fallback, and its ids match the Python tokenizer.</p>
 <h3 id="weights">Weights</h3>
 <p><a href="https://github.com/blixt/phonon/blob/main/scripts/build-weights.ts">scripts/build-weights.ts</a> converts Gradium&#39;s <code>model.safetensors</code> (the language model in bf16, the codec decoder in f32) once, with <a href="https://github.com/blixt/phonon/blob/main/src/checkpoint.ts">checkpoint.ts</a>, into the file the library downloads from <a href="https://huggingface.co/blixt/phonon-31m-en-webgpu">blixt/phonon-31m-en-webgpu</a>. It does not use the GGUF file.</p>
@@ -355,6 +356,74 @@ const speech = await tts.speak(&quot;Le petit chat dort au soleil près de la fe
 <li>The prefill and the codec transformer use a flash-style attention kernel: 16 query rows share each tile of 16 keys in shared memory, with an online softmax. It gives about 2% (A/B).</li>
 </ol>
 <p>An empty dependent dispatch costs about 1.6 µs in Chrome and WebKit on the M3 Max. A Phonon 31M step has 49 dispatches (5 for each of the 6 layers, 19 for the flow head and the end of the step), and their barriers and ramps take about a third of its 300 µs.</p>
+<h3 id="the-cpu-tier">The CPU tier</h3>
+<p>A browser without WebGPU runs the same model on the CPU. <a href="https://github.com/blixt/phonon/blob/main/src/lm.ts">lm.ts</a> and <a href="https://github.com/blixt/phonon/blob/main/src/codec.ts">codec.ts</a> build their ops through an interface (<a href="https://github.com/blixt/phonon/blob/main/src/graph.ts">graph.ts</a>) that both backends implement, so both run one graph, and <a href="https://github.com/blixt/phonon/blob/main/src/engine.ts">engine.ts</a> drives both with the same loop. The CPU&#39;s ops are about a dozen kernels in Rust with WebAssembly SIMD (<a href="https://github.com/blixt/phonon/tree/main/cpu">cpu</a>), in one module of 77 KB (17 KB with gzip), and a worker of 10 KB with gzip. Each op is a descriptor of a few words in the module&#39;s memory, written once when the graph is built, and a submit runs its ops in one call. The engine runs in a worker, so speaking never blocks the page. The weights are the same file. The key and value cache is f32, where WebGPU&#39;s is f16.</p>
+<p>On the M3 Max, under load from other work (load average about 20), in Chrome, interleaved over 5 rounds of the 11 benchmark texts:</p>
+<div class="table"><table>
+<thead>
+<tr>
+<th>Runtime</th>
+<th align="right">Threads</th>
+<th align="right">Speed (× real time)</th>
+<th align="right">First audio, warm (ms)</th>
+<th align="right">Cold start (ms)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>blixt/phonon, CPU</strong></td>
+<td align="right">8</td>
+<td align="right">37.5</td>
+<td align="right">4.0</td>
+<td align="right">86</td>
+</tr>
+<tr>
+<td><strong>blixt/phonon, CPU</strong></td>
+<td align="right">3</td>
+<td align="right">17.8</td>
+<td align="right">8.5</td>
+<td align="right">99</td>
+</tr>
+<tr>
+<td><strong>blixt/phonon, CPU</strong></td>
+<td align="right">1</td>
+<td align="right">7.0</td>
+<td align="right">20.1</td>
+<td align="right">138</td>
+</tr>
+<tr>
+<td>phonon-tts, CPU</td>
+<td align="right">3</td>
+<td align="right">11.2</td>
+<td align="right">12.2</td>
+<td align="right">310</td>
+</tr>
+<tr>
+<td>phonon-tts, CPU</td>
+<td align="right">1</td>
+<td align="right">5.7</td>
+<td align="right">23.6</td>
+<td align="right">451</td>
+</tr>
+</tbody></table></div>
+<p>In order of their effect:</p>
+<ol>
+<li>Relaxed SIMD. A second build of the module uses <code>f32x4.relaxed_madd</code>, a fused multiply-add, and the page loads it where the browser validates it (Chrome 114, Firefox 146). It makes speech 1.47 times faster on one thread (7.1× against 4.8×, A/B). Safari has no relaxed SIMD and runs the other build.</li>
+<li>Threads. With shared memory, pool workers take part in every op. Each op&#39;s work is in units that threads claim from a counter in chunks, so a thread on an efficiency core, or one the system preempts, holds back no one. An op waits only for the threads that joined it, and a thread that wakes after the engine&#39;s thread has finished the op skips it. On 12 threads this gives 38.5× against 28.5× for fixed shares, and on 16 threads of a busy machine 22.7× against 10.5× (A/B). Speech is the same for any number of threads: a unit&#39;s sums never depend on which thread runs it.</li>
+<li>Dot-product GEMM tiles. A tile of rows by columns keeps its sums along K in vector lanes, from contiguous loads of the activations and of the weights dequantized into a panel, and adds the lanes once at its end. On the codec&#39;s first convolution it ran at 31 GMAC/s against 23 for the best tile that broadcasts one activation at a time (A/B). The best shape depends on the CPU: 4 × 4 or 2 × 8 on the M3 Max, and 2 × 4 on a Ryzen 7 9700X, which has 16 SIMD registers to the M3&#39;s 32 (35 against 25 GMAC/s). The engine times each shape on two of the codec&#39;s products when it first loads (70 ms on one thread of the M3 Max) and keeps the fastest in the browser&#39;s cache.</li>
+<li>No work on padding. A text&#39;s prefill marks its padding rows (<code>Gate</code> &quot;text&quot; in <a href="https://github.com/blixt/phonon/blob/main/src/graph.ts">graph.ts</a>), and the CPU skips them. WebGPU still computes them, as its prefill sizes are fixed, and its output is unchanged. This cut first audio of a sentence on one thread from 48 ms to 20 ms in the benchmark.</li>
+<li>int16 GEMV. An LM step&#39;s input is rounded to int16 with one scale per 32 values, and each row of int8 weights meets it in <code>i32x4.dot_i16x8_s</code>, 8 products per instruction. It made the GEMVs 1.7 to 2.3 times faster on the Ryzen, and speech 3% faster on the M3 Max (A/B).</li>
+</ol>
+<p>The threads need a cross-origin isolated page, and GitHub Pages cannot set headers. The demo registers a small service worker (<a href="https://github.com/blixt/phonon/blob/main/site/coi.js">coi.js</a>) that adds them, then reloads once. It does this only when it will speak on the CPU, so a visitor with WebGPU never gets it. On the M3 Max the reload makes the CPU tier about 5 times faster (37.5× on 8 threads against 7.0× on one), and the reload took 80 to 100 ms from a local server, on a first visit that downloads 44 MB anyway. A library user can set the headers on their own server, or run on one thread.</p>
+<p>The CPU tier is checked against WebGPU and the reference:</p>
+<ul>
+<li><a href="https://github.com/blixt/phonon/blob/main/bench/ops.mjs">bench/ops.mjs</a> runs every op of the graph on WebGPU and on the CPU with the model&#39;s weights and fixed inputs: each GEMM tile shape, both GEMVs and both builds, 268 outputs. Each output must be within 1e-4 of its largest value, 1e-3 with the int16 GEMV, and 2e-3 where WebGPU keeps the cache in f16 or takes the sine of a large angle. A kernel that changes on one side fails it.</li>
+<li><a href="https://github.com/blixt/phonon/blob/main/bench/golden.mjs">bench/golden.mjs</a> speaks 5 clips on each backend and checks each against the reference&#39;s take (<a href="https://github.com/blixt/phonon/blob/main/bench/golden.json">bench/golden.json</a>, from <a href="https://github.com/blixt/phonon/blob/main/bench/golden.py">bench/golden.py</a>): the same length in frames, within 4 dB in log-mel distance, and word starts within one frame of the other backend. A change to the shared graph fails it on both backends.</li>
+<li>Parity (<a href="https://github.com/blixt/phonon/blob/main/bench/parity.py">bench/parity.py</a>) over the 11 benchmark texts with seeds 1, 2 and 3 in the voice Delia: WebGPU made 31 of the 33 clips the same length as the reference, the CPU 30. On the 30 Harvard clips both were 2.68 dB from the reference on average, correlated at 0.53. The Rainbow passage drifted from the reference on both, at a different point in each seed.</li>
+<li>Word starts against wav2vec2 alignment, on the 11 texts in 4 voices (712 words): a mean of 66.8 ms and a median of 65 ms on the CPU, against 66.7 ms and 65 ms on WebGPU. On the 10 Harvard sentences in Delia the CPU&#39;s word times equal WebGPU&#39;s to the bit.</li>
+<li>All five 40M models gave the same lengths as on WebGPU, and the same word times on 8 of 10 test sentences.</li>
+<li>Chrome 153, Firefox 155 and WebKit (headless, on macOS) all ran it, threaded and not, and made the same audio to the bit.</li>
+</ul>
+<p>The CPU tier&#39;s memory is 115 MB for Phonon 31M and 139 MB for a 40M model, all in the module&#39;s memory: the weights (43.3 or 53.4 MB), the f32 key and value cache (25 or 38 MB), the codec&#39;s stages and the activations.</p>
 <h3 id="word-timings">Word timings</h3>
 <ol>
 <li>Find a head that follows the text. I ran the reference on four texts and recorded each head&#39;s attention over the text tokens at every 80 ms frame. Each head got a score: the correlation between the frame number and the token it attends most, times the share of frames that do not move back, times its mean peak attention. Layer 3, head 0 scored 0.78. The next best (layer 3, head 5) scored 0.45, and all others 0.15 or less. Layer 3, head 0 has a correlation of 0.99 or more, never moves back and puts about 80% of its attention on one token.</li>
@@ -480,6 +549,8 @@ const speech = await tts.speak(&quot;Le petit chat dort au soleil près de la fe
 <li><code>layout: &quot;auto&quot;</code> drops bindings that a shader does not use, and a bind group with the full set then fails. Every kernel now touches all its bindings, and the layouts come from the declarations.</li>
 <li>More than 8 storage buffers in one shader breaks the portable limit. The weights are one buffer, bound once, and kernels get each tensor&#39;s offset in a uniform.</li>
 <li>An <code>uncapturederror</code> handler in a worker crashes the page after a synthesis in WebKit. The engine has none.</li>
+<li>On the CPU, a GEMM tile that broadcasts one activation at a time to 8 or 16 columns lost to the best dot-product tile on every product measured, on the M3 Max and on the Ryzen. A dot-product tile of 6 × 4 needs more vector registers than the M3 Max has, and ran at 15 GMAC/s against 24 for 4 × 4.</li>
+<li>A SIMD epilogue for 4 rows of a GEMV at a time, in place of a scalar one for each row, did not change the f32 GEMV&#39;s speed on the Ryzen (4 GMAC/s for <code>fc1</code>).</li>
 </ul>
 <h3 id="benchmark-notes">Benchmark notes</h3>
 <ul>
@@ -496,6 +567,9 @@ const speech = await tts.speak(&quot;Le petit chat dort au soleil près de la fe
 <li>Fewer dispatches: folding the noise into the flow head&#39;s input GEMV, and the end-of-speech, output and latent projections into one workgroup, should give 3-6%.</li>
 <li>Faster codec convolutions: wider tiles per thread, and direct kernels for the last convolution (1 output channel) and <code>s3r1</code> (32 channels).</li>
 <li>Text normalization of numbers and symbols, as phonon-tts does.</li>
+<li>A CPU build for Safari with int16 GEMMs (<code>i32x4.dot_i16x8_s</code>), as Safari has no fused multiply-add in WebAssembly. It should make the codec about 1.5 times faster there.</li>
+<li>CPU attention that shares each key and value between 4 query rows, and ELU in the convolutions&#39; loads (together about 10% of the CPU&#39;s time).</li>
+<li>An f16 key and value cache on the CPU, which would save 13 MB with Phonon 31M.</li>
 </ul>
 </div></section>
 <section class="doc" id="method"><div><h2>Method</h2></div><div class="body"><div class="table"><table>
@@ -540,9 +614,17 @@ python bench/plots.py &amp;&amp; python bench/table.py      # figures and table
 <pre><code class="language-sh">node bench/run.mjs --first-runs 3 --runs 5 --runtimes ours,oursMultilingual,gradiumWebgpu,gradiumWebgpuMultilingual --audio none --out bench/results/40m
 HF_LOCAL=&quot;gradium/phonon-40m-multilingual=path/to/download&quot; node bench/drive.mjs &quot;http://127.0.0.1:7893/bench/?device=mac&quot;
 </code></pre>
+<p>The CPU tier&#39;s run, and its checks against WebGPU and the reference (the WebAssembly modules come from <code>npm run build-cpu</code>, which needs Rust with the wasm32-unknown-unknown target and rust-src):</p>
+<pre><code class="language-sh">node bench/run.mjs --runs 5 --kinds cold,warm --runtimes oursCpu,oursCpu3,oursCpu1,gradiumCpu,gradiumCpu1 --audio none --out bench/results/cpu
+node bench/drive.mjs &quot;http://127.0.0.1:7893/bench/?device=mac&quot;
+npm run test-backends                       # bench/ops.mjs and bench/golden.mjs
+node bench/parity.mjs out/webgpu webgpu 1,2,3 &amp;&amp; node bench/parity.mjs out/cpu cpu 1,2,3
+python bench/parity.py out/webgpu out/cpu
+</code></pre>
 </div></section>
 <section class="doc" id="limits"><div><h2>Limits</h2></div><div class="body"><ul>
-<li>The browser must have WebGPU. On Android, Chrome turns WebGPU off under Advanced Protection and on some GPUs. The demo then says why it cannot speak, and &quot;Copy details&quot; copies the browser, the GPU and the last error for a bug report.</li>
+<li>Without WebGPU, the browser must have WebAssembly SIMD (Chrome 91, Firefox 89, Safari 16.4). On Android, Chrome turns WebGPU off under Advanced Protection and on some GPUs, and the demo then speaks on the CPU. &quot;Copy details&quot; copies the browser, the GPU, the backend and the last error for a bug report.</li>
+<li>Safari has no relaxed SIMD, and its CPU tier runs the build without fused multiply-adds, about 1.5 times slower.</li>
 <li>Only Phonon 31M, in English, is Apache-2.0. The 40M models are under CC BY-NC 4.0: no commercial use.</li>
 <li>phonon-tts can write out numbers, amounts, dates and symbols as words before it speaks, in each language&#39;s own way. blixt/phonon cannot, and numbers read best written as words.</li>
 <li>The word times follow the model&#39;s attention. They are not a forced alignment.</li>

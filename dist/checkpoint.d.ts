@@ -21,7 +21,7 @@ export declare function readSafetensors(buffer: ArrayBuffer): Map<string, {
     data: Float32Array;
 }>;
 /** f32 to f16 bits, rounding to nearest even. */
-export declare function toF16(values: Float32Array): Uint16Array;
+export declare function toF16(values: Float32Array): Uint16Array<ArrayBuffer>;
 /** Symmetric int8 with one f16 scale per group, from the values rounded to f16 first:
  *  scale = max |v| / 127, q = v / scale rounded half to even. */
 export declare function quantize(values: Float32Array): {
@@ -34,4 +34,4 @@ export declare function convertCheckpoint(buffer: ArrayBuffer): PhononModel;
 export declare function packModel(model: PhononModel): Uint8Array<ArrayBuffer>;
 export declare function unpackModel(buffer: ArrayBuffer): PhononModel;
 /** A catalog voice file: its speaker latents as [125 frames][512]. */
-export declare function readVoice(buffer: ArrayBuffer): Float32Array;
+export declare function readVoice(buffer: ArrayBuffer): Float32Array<ArrayBuffer>;

@@ -1,41 +1,6 @@
-export type Act = "none" | "gelu" | "silu";
-/** none | add (y = r + acc) | add_y (y += acc) | gate (y = r + g * acc) |
- *  gate_y (y += g * acc) | vec (y = acc + v, v from the blob) */
-export type Residual = "none" | "add" | "add_y" | "gate" | "gate_y" | "vec";
-/** The state buffer's u32 slots: the position the next LM step feeds, the frame it makes, the
- *  frames to keep once the end of speech is seen (0 before), the first 200 Hz position of the
- *  codec's chunk, the text's length in tokens, and the frames to keep after the end-of-speech
- *  frame, then the noise seed and its f32 scale (stored as u32 bits). */
-export declare const STATE: {
-    readonly pos: 0;
-    readonly frame: 1;
-    readonly end: 2;
-    readonly chunk: 3;
-    readonly text: 4;
-    readonly after: 5;
-    readonly seed: 6;
-    readonly scale: 7;
-};
-/** Where the alignment head's scores go: one row per frame over the text tokens, which start
- *  at position `lo`, `width` floats per row. */
-export interface Align {
-    lo: number;
-    width: number;
-    head: number;
-}
-/** Which work returns at once past the end: none, an LM step (its frame) or a codec chunk (its
- *  first frame). */
-export type Gate = "none" | "step" | "chunk";
-/** The two transformers' key and value caches: the LM's, f16 at fixed positions, or the
- *  codec's, an f32 ring at the chunk's position over a window, its work gated past the end. */
-export type Cache = {
-    kind: "lm";
-} | {
-    kind: "codec";
-    window: number;
-    ring: number;
-};
-/** Each kernel's uniform fields, in order: its WGSL struct and the values graph.ts writes. */
+import { STATE, type Act, type Align, type Cache, type ConvShape, type Gate, type Residual } from "./graph";
+export { STATE };
+/** Each kernel's uniform fields, in order: its WGSL struct and the values gpu.ts writes. */
 export declare const UNIFORMS: {
     readonly layernorm: readonly ["go", "bo"];
     readonly rows: readonly ["rows", "pos0"];
@@ -48,14 +13,6 @@ export declare const UNIFORMS: {
     readonly finishStep: readonly ["ewo", "ebo", "ngo", "nbo"];
 };
 export type Fields = readonly string[];
-export interface ConvShape {
-    cin: number;
-    k?: number;
-    dil?: number;
-    elu?: boolean;
-    /** Transposed convolutions: the stride, one GEMM per output phase. */
-    stride?: number;
-}
 export interface GemmOptions {
     K: number;
     N: number;
@@ -84,8 +41,6 @@ export interface GemvOptions {
     /** 32-lane subgroup sums, else shared memory. */
     sg: boolean;
 }
-/** int8 weights per f16 scale. */
-export declare const Q8_GROUP = 32;
 /** LayerNorm over 512 channels per row (one workgroup each), with its affine weights. */
 export declare function layernorm({ eps, gate }: {
     eps: string;

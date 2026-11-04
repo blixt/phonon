@@ -1,5 +1,23 @@
 import { type Language, type ModelId } from "./files";
 import { type Span, type Word } from "./timing";
+/** Where a model runs. */
+export interface Backend {
+    name: "webgpu" | "cpu";
+    /** On the CPU: threads that share each op's work, and the WebAssembly build ("relaxed" for
+     *  relaxed SIMD, else "simd"). */
+    threads?: number;
+    simd?: string;
+}
+export interface LoadOptions {
+    /** files.ts MODELS: Phonon 31M by default. */
+    model?: ModelId;
+    /** Hears the download in percent. */
+    progress?: (percent: number) => void;
+    /** "auto" (the default) runs on WebGPU when the browser gives an adapter, else on the CPU. */
+    backend?: "auto" | "webgpu" | "cpu";
+    /** CPU threads, when the page is cross-origin isolated: by default one per core, at most 8. */
+    threads?: number;
+}
 /** A voice of Gradium's catalog. */
 export interface Voice {
     name: string;
@@ -39,16 +57,14 @@ export declare class Phonon {
     private readonly catalog;
     /** Settles when the GPU device is lost (a reset): load again to go on. */
     readonly lost: Promise<unknown>;
+    readonly backend: Backend;
     /** The voice `speak` uses when none is given: the default of the model's first language. */
     readonly defaultVoice: string;
     private readonly lag;
     private constructor();
-    /** Loads a model (files.ts MODELS, Phonon 31M by default): a download the first time, then
-     *  the browser's cache. `progress` hears the download in percent. */
-    static load({ model, progress, }?: {
-        model?: ModelId;
-        progress?: (percent: number) => void;
-    }): Promise<Phonon>;
+    /** Loads a model: a download the first time, then the browser's cache. It runs on WebGPU
+     *  when the browser has an adapter, else on the CPU, in a worker. */
+    static load({ model, progress, backend, threads }?: LoadOptions): Promise<Phonon>;
     /** The catalog's voices in the model's languages. */
     get voices(): readonly Voice[];
     /** The words `speak` gives for a text, in order, each with its tokens' text, as the tokenizer
