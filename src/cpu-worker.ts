@@ -2,7 +2,7 @@
 // the module, lays out its memory (cpu.ts) and runs the engine (engine.ts) on it, as the page
 // asks (remote.ts). With shared memory it also starts pool workers, more copies of this file,
 // each a thread that takes part of every op.
-import { unpackModel, type PhononModel } from "./checkpoint";
+import { unpackModel, withoutWeights } from "./checkpoint";
 import { CpuGraph, instantiate, simdLevel, STACK, TILES, type CpuExports, type Variant } from "./cpu";
 import { MODEL_CACHE } from "./files";
 import { PhononEngine } from "./engine";
@@ -18,10 +18,13 @@ interface Pool {
   memory: WebAssembly.Memory;
 }
 
+/** The pool threads, which `close` ends. */
+const workers: Worker[] = [];
+
 /** Starts pool threads 1..n-1, thread i's stack ending at `stacks` + i * STACK, and answers how
  *  many threads came up in order (with this one). */
 async function startPool(pool: Pool, url: string, n: number, stacks: number): Promise<number> {
-  const workers = Array.from({ length: n - 1 }, () => new Worker(url, { type: "module" }));
+  workers.push(...Array.from({ length: n - 1 }, () => new Worker(url, { type: "module" })));
   const up = await Promise.all(
     workers.map(
       (w, k) =>
@@ -40,20 +43,30 @@ async function startPool(pool: Pool, url: string, n: number, stacks: number): Pr
     ),
   );
   const count = up.indexOf(false) < 0 ? up.length : up.indexOf(false);
-  workers.slice(count).forEach((w) => w.terminate());
+  workers.splice(count).forEach((w) => w.terminate());
   return 1 + count;
 }
 
-/** The fastest GEMM tile on this device, timed on first use and kept in the cache. */
+/** The fastest GEMM tile on this device, timed on first use and kept in the cache when there is
+ *  one (an insecure page has none). */
 async function tile(g: CpuGraph, key: string): Promise<Variant["tile"]> {
-  const cache = await caches.open(MODEL_CACHE).catch(() => null);
-  const hit = await cache?.match(key).catch(() => undefined);
-  if (hit) {
-    const known = (await hit.json()) as Variant["tile"];
-    if (TILES.some((t) => JSON.stringify(t) === JSON.stringify(known))) return known;
+  let cache: Cache | null = null;
+  try {
+    cache = await caches.open(MODEL_CACHE);
+    const hit = await cache.match(key);
+    if (hit) {
+      const known = (await hit.json()) as Variant["tile"];
+      if (TILES.some((t) => JSON.stringify(t) === JSON.stringify(known))) return known;
+    }
+  } catch {
+    /* Time them. */
   }
   const best = g.fastestTile();
-  await cache?.put(key, new Response(JSON.stringify(best))).catch(() => {});
+  try {
+    await cache?.put(key, new Response(JSON.stringify(best)));
+  } catch {
+    /* Time them again next time. */
+  }
   return best;
 }
 
@@ -67,7 +80,9 @@ async function load(m: Extract<ToWorker, { type: "load" }>) {
   const shared = scope.crossOriginIsolated && m.threads > 1;
   const url = new URL(`./phonon-cpu-${level}.wasm`, import.meta.url);
   const model = unpackModel(m.packed);
-  const wasm = new Uint8Array(await (await fetch(url)).arrayBuffer());
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`The CPU engine's module could not download (${response.status}).`);
+  const wasm = new Uint8Array(await response.arrayBuffer());
   const { module, memory, exports: x } = await instantiate(wasm, shared, model.blob.byteLength + 64 * 2 ** 20);
   // Pool threads' stacks first, then everything cpu.ts lays out.
   const base = Math.ceil((x.__heap_base.value as number) / 64) * 64;
@@ -76,8 +91,8 @@ async function load(m: Extract<ToWorker, { type: "load" }>) {
   // A new build of the module times the tiles again.
   g.tune({ tile: await tile(g, `${url}?bytes=${wasm.byteLength}&threads=${threads}`), gemv: "int16" });
   graph = g;
-  const light: PhononModel = { tensors: model.tensors, pace: model.pace, blob: new Uint8Array() };
-  engine = new PhononEngine(g, light, m.align);
+  // The packed file (with the weights the module copied) goes once nothing points into it.
+  engine = new PhononEngine(g, withoutWeights(model), m.align);
   await engine.ready();
   return { threads, simd: level, memory: memory.buffer.byteLength };
 }
@@ -96,8 +111,14 @@ scope.onmessage = async (e: MessageEvent) => {
     try {
       scope.postMessage({ type: "loaded", ...(await load(m)) });
     } catch (err) {
+      workers.splice(0).forEach((w) => w.terminate());
       scope.postMessage({ type: "error", message: String((err as Error)?.message ?? err) });
     }
+    return;
+  }
+  if (m.type === "close") {
+    workers.splice(0).forEach((w) => w.terminate());
+    scope.postMessage({ type: "closed" });
     return;
   }
   if (m.type === "cancel") {

@@ -1,7 +1,8 @@
 // A service worker that makes the demo cross-origin isolated on a host that cannot set headers
 // (GitHub Pages), so the CPU engine can run threads: it adds COOP and COEP to the page's own
-// responses, and CORP to the files it loads. The demo registers it only when it will speak on
-// the CPU, then reloads once.
+// responses, and CORP to the files it loads. It is registered for the demo's URL with "?cpu",
+// which a page without WebGPU moves to once, and for the CPU tier's folder cpu/, where its
+// workers' scripts are (site.ts isolate), so it controls no other page.
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
 self.addEventListener("fetch", (e) => {

@@ -1,114 +1,3 @@
-var __defProp = Object.defineProperty;
-var __getOwnPropNames = Object.getOwnPropertyNames;
-var __esm = (fn, res, err) => function __init() {
-  if (err) throw err[0];
-  try {
-    return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
-  } catch (e) {
-    throw err = [e], e;
-  }
-};
-var __export = (target, all) => {
-  for (var name in all)
-    __defProp(target, name, { get: all[name], enumerable: true });
-};
-
-// src/remote.ts
-var remote_exports = {};
-__export(remote_exports, {
-  CpuEngine: () => CpuEngine
-});
-var CpuEngine;
-var init_remote = __esm({
-  "src/remote.ts"() {
-    "use strict";
-    CpuEngine = class _CpuEngine {
-      /** Threads that take part in each op, this worker's included. */
-      threads;
-      /** The WebAssembly build: "relaxed" (relaxed SIMD) or "simd". */
-      simd;
-      worker;
-      voices = /* @__PURE__ */ new Set();
-      jobs = /* @__PURE__ */ new Map();
-      next = 1;
-      constructor(worker, info) {
-        this.worker = worker;
-        this.threads = info.threads;
-        this.simd = info.simd;
-        worker.onmessage = (e) => this.hear(e.data);
-        let lose = () => {
-        };
-        this.lost = new Promise((settle) => lose = settle);
-        worker.onerror = (e) => {
-          this.dead = new Error(e.message || "The CPU engine's worker stopped.");
-          for (const job of this.jobs.values()) job.fail(this.dead);
-          this.jobs.clear();
-          lose(this.dead);
-        };
-      }
-      dead = null;
-      /** Settles when the worker stops: load again to go on. */
-      lost;
-      /** Starts the worker with a model's packed weights (moved to it, not copied). */
-      static async start(packed, align, threads) {
-        const worker = new Worker(new URL("./phonon-cpu.js", import.meta.url), { type: "module" });
-        const info = await new Promise((resolve, reject) => {
-          worker.onmessage = (e) => {
-            if (e.data.type === "loaded") resolve(e.data);
-            else if (e.data.type === "error") reject(new Error(e.data.message));
-          };
-          worker.onerror = (e) => reject(new Error(e.message || "The CPU engine's worker failed to start."));
-          const m = { type: "load", packed, align, threads };
-          worker.postMessage(m, [packed]);
-        });
-        return new _CpuEngine(worker, info);
-      }
-      hasVoice(name) {
-        return this.voices.has(name);
-      }
-      synthesize(ids, voice, options = {}) {
-        const id = this.next++;
-        const { seed, pace, words, latents } = options;
-        const m = { type: "speak", id, ids, voice, options: { seed, pace, words } };
-        if (!this.voices.has(voice) && latents) {
-          m.latents = latents.slice();
-          this.voices.add(voice);
-        }
-        if (this.dead) return Promise.reject(this.dead);
-        return new Promise((done, fail) => {
-          this.jobs.set(id, { options, chunks: [], done, fail, cancelSent: false });
-          this.worker.postMessage(m, m.latents ? [m.latents.buffer] : []);
-        });
-      }
-      hear(m) {
-        if (m.type === "loaded" || m.id === void 0) return;
-        const job = this.jobs.get(m.id);
-        if (!job) return;
-        if (m.type === "error") {
-          this.jobs.delete(m.id);
-          job.fail(new Error(m.message));
-          return;
-        }
-        if (m.type === "done") {
-          this.jobs.delete(m.id);
-          job.done(m.cancelled ? null : { chunks: job.chunks });
-          return;
-        }
-        if (job.options.cancelled?.()) {
-          if (!job.cancelSent) this.worker.postMessage({ type: "cancel", id: m.id });
-          job.cancelSent = true;
-          return;
-        }
-        if (m.type === "rows") job.options.onRows?.(m.rows);
-        else {
-          job.chunks.push(m.samples);
-          job.options.onChunk?.(m.samples);
-        }
-      }
-    };
-  }
-});
-
 // src/pace.ts
 var H = 512;
 function matvec(w, x, rows) {
@@ -235,6 +124,10 @@ function unpackModel(buffer) {
     o += n * 4;
   }
   return { tensors: header.tensors, pace, blob: new Uint8Array(buffer, o) };
+}
+function withoutWeights(m) {
+  const pace = Object.fromEntries(Object.entries(m.pace).map(([k, v]) => [k, v.slice()]));
+  return { tensors: m.tensors, pace, blob: new Uint8Array() };
 }
 function readVoice(buffer) {
   const t = readSafetensors(buffer).get("speaker_wavs");
@@ -2177,11 +2070,14 @@ var Phonon = class _Phonon {
   /** Settles when the GPU device is lost (a reset), or the CPU's worker stops: load again to go on. */
   lost;
   backend;
+  release;
+  closed = false;
   /** The voice `speak` uses when none is given: the default of the model's first language. */
   defaultVoice;
   lag;
-  constructor(engine, tokenizer, catalog, languages, lag, lost, backend) {
+  constructor(engine, tokenizer, catalog, languages, lag, lost, backend, release) {
     this.backend = backend;
+    this.release = release;
     this.engine = engine;
     this.tokenizer = tokenizer;
     this.catalog = catalog;
@@ -2211,19 +2107,32 @@ var Phonon = class _Phonon {
         }))
       )
     ]);
-    const make = (engine2, lost, b) => new _Phonon(engine2, tokenizer, catalog, files.languages, files.align.lag, lost, b);
+    const make = (engine, lost, b, release) => new _Phonon(engine, tokenizer, catalog, files.languages, files.align.lag, lost, b, release);
     if (!adapter) {
-      const { CpuEngine: CpuEngine2 } = await Promise.resolve().then(() => (init_remote(), remote_exports));
+      const { CpuEngine } = await import("./cpu/remote-G27CUOLC.js");
       const cores = navigator.hardwareConcurrency || 1;
-      const engine2 = await CpuEngine2.start(packed, files.align, threads ?? Math.min(8, cores));
-      return make(engine2, engine2.lost, { name: "cpu", threads: engine2.threads, simd: engine2.simd });
+      const engine = await CpuEngine.start(packed, files.align, threads ?? Math.min(8, cores));
+      const b = { name: "cpu", threads: engine.threads, simd: engine.simd };
+      return make(engine, engine.lost, b, () => engine.close());
     }
     const subgroups = subgroups32(adapter);
     const device = await adapter.requestDevice({ requiredFeatures: subgroups ? ["subgroups"] : [] });
-    const unpacked = unpackModel(packed);
-    const engine = new PhononEngine(new GpuGraph(device, unpacked, subgroups), light(unpacked), files.align);
-    await engine.ready();
-    return make(engine, device.lost, { name: "webgpu" });
+    try {
+      const unpacked = unpackModel(packed);
+      const engine = new PhononEngine(new GpuGraph(device, unpacked, subgroups), withoutWeights(unpacked), files.align);
+      await engine.ready();
+      return make(engine, device.lost, { name: "webgpu" }, async () => device.destroy());
+    } catch (error) {
+      device.destroy();
+      throw error;
+    }
+  }
+  /** Releases the model: its GPU device, or its CPU worker and threads. A text in progress
+   *  fails, and so does every later `speak`. */
+  async close() {
+    if (this.closed) return;
+    this.closed = true;
+    await this.release();
   }
   /** The catalog's voices in the model's languages. */
   get voices() {
@@ -2245,6 +2154,7 @@ var Phonon = class _Phonon {
   }
   /** Text to speech, in parts that fit the model, joined. */
   async speak(text, options = {}) {
+    if (this.closed) throw new Error("This model is closed.");
     const { voice = this.defaultVoice, speed = 1, seed = 1, onAudio, onWord, signal } = options;
     const v = this.catalog.find((c) => c.name === voice || c.id === voice);
     if (!v) throw new Error(`No voice ${voice}`);
@@ -2286,10 +2196,6 @@ var Phonon = class _Phonon {
     return { audio: join(audio), sampleRate: SAMPLE_RATE, words, tokens };
   }
 };
-function light(m) {
-  const pace = Object.fromEntries(Object.entries(m.pace).map(([k, v]) => [k, v.slice()]));
-  return { tensors: m.tensors, pace, blob: new Uint8Array() };
-}
 function join(parts2) {
   const out = new Float32Array(parts2.reduce((n, c) => n + c.length, 0));
   let at = 0;

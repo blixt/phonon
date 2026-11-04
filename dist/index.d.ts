@@ -58,6 +58,8 @@ export declare class Phonon {
     /** Settles when the GPU device is lost (a reset), or the CPU's worker stops: load again to go on. */
     readonly lost: Promise<unknown>;
     readonly backend: Backend;
+    private readonly release;
+    private closed;
     /** The voice `speak` uses when none is given: the default of the model's first language. */
     readonly defaultVoice: string;
     private readonly lag;
@@ -65,6 +67,9 @@ export declare class Phonon {
     /** Loads a model: a download the first time, then the browser's cache. It runs on WebGPU
      *  when the browser has an adapter, else on the CPU, in a worker. */
     static load({ model, progress, backend, threads }?: LoadOptions): Promise<Phonon>;
+    /** Releases the model: its GPU device, or its CPU worker and threads. A text in progress
+     *  fails, and so does every later `speak`. */
+    close(): Promise<void>;
     /** The catalog's voices in the model's languages. */
     get voices(): readonly Voice[];
     /** The words `speak` gives for a text, in order, each with its tokens' text, as the tokenizer

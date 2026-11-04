@@ -13,12 +13,12 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --format=esm --target=es2022 --outfile=dist/phonon.js && esbuild src/cpu-worker.ts --bundle --format=esm --target=es2022 --outfile=dist/phonon-cpu.js && npm run site && tsc -p tsconfig.build.json",
+    "build": "rm -f dist/cpu/remote-*.js && esbuild src/index.ts --bundle --splitting --format=esm --target=es2022 --outdir=dist --entry-names=phonon --chunk-names=cpu/[name]-[hash] && esbuild src/cpu-worker.ts --bundle --format=esm --target=es2022 --outfile=dist/cpu/phonon-cpu.js && npm run site && tsc -p tsconfig.build.json",
     "check": "tsc -p . --noEmit",
     "bench": "node bench/run.mjs",
     "test": "esbuild src/*.test.ts --bundle --platform=node --format=esm --outdir=.test --log-level=warning && node --test .test/",
     "build-weights": "esbuild scripts/build-weights.ts --bundle --platform=node --format=esm --outfile=.test/build-weights.mjs --log-level=warning && node .test/build-weights.mjs",
-    "site": "esbuild site/site.ts --bundle --format=esm --target=es2022 --minify --outfile=docs/site.js && esbuild src/cpu-worker.ts --bundle --format=esm --target=es2022 --minify --outfile=docs/phonon-cpu.js && cp dist/phonon-cpu-relaxed.wasm dist/phonon-cpu-simd.wasm site/coi.js docs/ && esbuild scripts/build-site.ts --bundle --platform=node --format=esm --packages=external --outfile=.test/build-site.mjs --log-level=warning && node .test/build-site.mjs",
+    "site": "rm -f docs/cpu/remote-*.js && esbuild site/site.ts --bundle --splitting --format=esm --target=es2022 --minify --outdir=docs --entry-names=site --chunk-names=cpu/[name]-[hash] && esbuild src/cpu-worker.ts --bundle --format=esm --target=es2022 --minify --outfile=docs/cpu/phonon-cpu.js && cp dist/cpu/phonon-cpu-relaxed.wasm dist/cpu/phonon-cpu-simd.wasm docs/cpu/ && cp site/coi.js docs/ && esbuild scripts/build-site.ts --bundle --platform=node --format=esm --packages=external --outfile=.test/build-site.mjs --log-level=warning && node .test/build-site.mjs",
     "build-cpu": "sh cpu/build.sh",
     "test-backends": "node bench/ops.mjs && node bench/golden.mjs"
   },
@@ -27,6 +27,7 @@
     "kokoro-js": "^1.2.1",
     "marked": "^18.1.2",
     "phonon-tts": "^0.6.0",
+    "playwright-core": "1.63.0",
     "typescript": "^7.0.2"
   },
   "repository": {

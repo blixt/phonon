@@ -1,10 +1,10 @@
 #!/bin/sh
-# Builds the CPU backend's two WebAssembly modules into dist/: SIMD128, and SIMD128 with relaxed
+# Builds the CPU backend's two WebAssembly modules into dist/cpu/: SIMD128, and SIMD128 with relaxed
 # SIMD. Each imports a memory that can be shared, for threads. Needs Rust with the
 # wasm32-unknown-unknown target and rust-src (core is built with atomics).
 set -e
 cd "$(dirname "$0")"
-out=../dist
+out=../dist/cpu
 mkdir -p "$out"
 for variant in simd relaxed; do
   features="+simd128,+atomics,+bulk-memory,+mutable-globals,+nontrapping-fptoint,+sign-ext"

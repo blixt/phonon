@@ -403,6 +403,13 @@ export function unpackModel(buffer: ArrayBuffer): PhononModel {
   return { tensors: header.tensors, pace, blob: new Uint8Array(buffer, o) };
 }
 
+/** A model without its weights, once a backend holds them: the tensors' places and copies of the
+ *  pace's vectors, which are otherwise views into the whole packed file. */
+export function withoutWeights(m: PhononModel): PhononModel {
+  const pace = Object.fromEntries(Object.entries(m.pace).map(([k, v]) => [k, v.slice()])) as PhononModel["pace"];
+  return { tensors: m.tensors, pace, blob: new Uint8Array() };
+}
+
 /** A catalog voice file: its speaker latents as [125 frames][512]. */
 export function readVoice(buffer: ArrayBuffer): Float32Array<ArrayBuffer> {
   const t = readSafetensors(buffer).get("speaker_wavs");

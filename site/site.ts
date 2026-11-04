@@ -384,18 +384,49 @@ function voiceOptions(voices: readonly Voice[], languages: readonly Language[]):
   });
 }
 
-/** Registers coi.js and reloads under it, once per tab: answers false when it cannot. */
-async function isolate(): Promise<boolean> {
+/** The CPU's threads need a cross-origin isolated page. A service worker (coi.js) adds the
+ *  headers, and only under two scopes: the URL "?cpu", and the folder cpu/ of the CPU tier's own
+ *  files (a worker is matched by its own URL, and its script needs the headers too). So it never
+ *  controls the demo's own URL, where a visitor with WebGPU comes. A page without WebGPU
+ *  registers it and moves to "?cpu" once (answers true when it does). A page that finds WebGPU
+ *  unregisters it, and a "?cpu" page moves back. */
+const CPU_SCOPE = "./?cpu";
+const CPU_FILES = "./cpu/";
+async function isolate(adapter: boolean): Promise<boolean> {
   const sw = navigator.serviceWorker;
-  if (!sw || !isSecureContext || sessionStorage.getItem("phonon-isolate")) return false;
-  sessionStorage.setItem("phonon-isolate", "1");
+  const here = new URL(location.href);
+  const onCpu = here.searchParams.has("cpu");
+  if (adapter) {
+    if (!sw) return false;
+    for (const r of await sw.getRegistrations().catch(() => []))
+      if (r.scope.endsWith("?cpu") || r.scope.endsWith("/cpu/")) await r.unregister();
+    if (!onCpu) return false;
+    here.searchParams.delete("cpu");
+    location.replace(here);
+    return true;
+  }
+  if (crossOriginIsolated || (navigator.hardwareConcurrency ?? 1) < 2 || !sw || !isSecureContext) return false;
+  // A "?cpu" page the worker did not control reloads once per tab: a browser that registers it
+  // but stays unisolated then runs on one thread.
+  if (onCpu && sessionStorage.getItem("phonon-isolate")) return false;
   try {
-    await sw.register("coi.js");
-    await sw.ready;
+    for (const scope of [CPU_SCOPE, CPU_FILES]) {
+      const r = await sw.register("coi.js", { scope });
+      const w = r.installing ?? r.waiting ?? r.active;
+      if (w && w.state !== "activated")
+        await new Promise<void>((done) => w.addEventListener("statechange", () => w.state === "activated" && done()));
+    }
   } catch {
     return false;
   }
-  location.reload();
+  if (onCpu) {
+    sessionStorage.setItem("phonon-isolate", "1");
+    location.reload();
+  } else {
+    const to = new URL(CPU_SCOPE, location.href);
+    to.hash = here.hash;
+    location.replace(to);
+  }
   return true;
 }
 
@@ -431,8 +462,8 @@ async function demo(redrawBars: () => void) {
     setTimeout(() => (copy.textContent = "Copy details"), 2000);
   };
   // Without WebGPU the demo speaks on the CPU, with threads once the page is cross-origin
-  // isolated: a service worker (coi.js) adds the headers, after one reload.
-  if (!adapter && !crossOriginIsolated && (navigator.hardwareConcurrency ?? 1) > 1 && (await isolate())) return;
+  // isolated (isolate).
+  if (await isolate(!!adapter)) return;
   const simd = WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11]));
   if (!adapter && !simd) {
     button.disabled = true;

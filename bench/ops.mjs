@@ -1,7 +1,7 @@
 // Runs bench/ops.ts in headless Chrome: every op of graph.ts on WebGPU and on the CPU, with
 // Phonon 31M's weights, and prints how far apart the outputs are. Exits with 1 when an output
 // differs by more than its tolerance. Usage: node bench/ops.mjs [MODEL] [PROFILE_DIR]
-// Needs dist/phonon-cpu-*.wasm (npm run build-cpu). Playwright from PLAYWRIGHT, or the repo's.
+// Needs dist/cpu/phonon-cpu-*.wasm (npm run build-cpu). Playwright from PLAYWRIGHT, or the repo's.
 import { createRequire } from "node:module";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -33,7 +33,7 @@ const result = await page.evaluate(async (model) => {
   const packed = await hit.arrayBuffer();
   const out = [];
   for (const level of relaxed ? ["relaxed", "simd"] : ["simd"]) {
-    const wasm = new Uint8Array(await (await fetch(`/dist/phonon-cpu-${level}.wasm`)).arrayBuffer());
+    const wasm = new Uint8Array(await (await fetch(`/dist/cpu/phonon-cpu-${level}.wasm`)).arrayBuffer());
     const r = await compareBackends(packed, wasm);
     out.push(...r.rows.map((row) => ({ ...row, build: level, subgroups: r.subgroups })));
   }

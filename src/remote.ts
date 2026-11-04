@@ -13,10 +13,12 @@ export type ToWorker =
       options: { seed?: number; pace?: number; words?: number };
       latents?: Float32Array<ArrayBuffer>;
     }
-  | { type: "cancel"; id: number };
+  | { type: "cancel"; id: number }
+  | { type: "close" };
 
 type FromWorker =
   | { type: "loaded"; threads: number; simd: string; memory: number }
+  | { type: "closed" }
   | { type: "rows"; id: number; rows: Float32Array }
   | { type: "chunk"; id: number; samples: Float32Array }
   | { type: "done"; id: number; cancelled: boolean }
@@ -70,8 +72,31 @@ export class CpuEngine implements Engine {
       worker.onerror = (e) => reject(new Error(e.message || "The CPU engine's worker failed to start."));
       const m: ToWorker = { type: "load", packed, align, threads };
       worker.postMessage(m, [packed]);
+    }).catch((error) => {
+      // Its pool threads end with it.
+      worker.terminate();
+      throw error;
     });
     return new CpuEngine(worker, info);
+  }
+
+  /** Ends the worker and its pool threads. Texts in progress fail, and so do later ones. */
+  async close() {
+    if (this.dead) return;
+    this.dead = new Error("This model is closed.");
+    for (const job of this.jobs.values()) job.fail(this.dead);
+    this.jobs.clear();
+    // The worker ends its pool threads first, then this ends it (and them, if it did not answer).
+    await new Promise<void>((done) => {
+      const timer = setTimeout(done, 1000);
+      this.worker.onmessage = (e: MessageEvent<FromWorker>) => {
+        if (e.data.type !== "closed") return;
+        clearTimeout(timer);
+        done();
+      };
+      this.worker.postMessage({ type: "close" } satisfies ToWorker);
+    });
+    this.worker.terminate();
   }
 
   hasVoice(name: string) {
@@ -94,7 +119,7 @@ export class CpuEngine implements Engine {
   }
 
   private hear(m: FromWorker) {
-    if (m.type === "loaded" || m.id === undefined) return;
+    if (m.type === "loaded" || m.type === "closed" || m.id === undefined) return;
     const job = this.jobs.get(m.id);
     if (!job) return;
     if (m.type === "error") {

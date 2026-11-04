@@ -4,6 +4,7 @@
 import {
   readVoice,
   unpackModel,
+  withoutWeights,
   type PhononModel,
 } from "./checkpoint";
 import {
@@ -169,6 +170,8 @@ export class Phonon {
   /** Settles when the GPU device is lost (a reset), or the CPU's worker stops: load again to go on. */
   readonly lost: Promise<unknown>;
   readonly backend: Backend;
+  private readonly release: () => Promise<void>;
+  private closed = false;
 
   /** The voice `speak` uses when none is given: the default of the model's first language. */
   readonly defaultVoice: string;
@@ -183,8 +186,10 @@ export class Phonon {
     lag: number,
     lost: Promise<unknown>,
     backend: Backend,
+    release: () => Promise<void>,
   ) {
     this.backend = backend;
+    this.release = release;
     this.engine = engine;
     this.tokenizer = tokenizer;
     this.catalog = catalog;
@@ -221,20 +226,34 @@ export class Phonon {
           })),
       ),
     ]);
-    const make = (engine: Engine, lost: Promise<unknown>, b: Backend) =>
-      new Phonon(engine, tokenizer, catalog, files.languages, files.align.lag, lost, b);
+    const make = (engine: Engine, lost: Promise<unknown>, b: Backend, release: () => Promise<void>) =>
+      new Phonon(engine, tokenizer, catalog, files.languages, files.align.lag, lost, b, release);
     if (!adapter) {
       const { CpuEngine } = await import("./remote");
       const cores = navigator.hardwareConcurrency || 1;
       const engine = await CpuEngine.start(packed, files.align, threads ?? Math.min(8, cores));
-      return make(engine, engine.lost, { name: "cpu", threads: engine.threads, simd: engine.simd });
+      const b: Backend = { name: "cpu", threads: engine.threads, simd: engine.simd };
+      return make(engine, engine.lost, b, () => engine.close());
     }
     const subgroups = subgroups32(adapter);
     const device = await adapter.requestDevice({ requiredFeatures: subgroups ? ["subgroups"] : [] });
-    const unpacked = unpackModel(packed);
-    const engine = new PhononEngine(new GpuGraph(device, unpacked, subgroups), light(unpacked), files.align);
-    await engine.ready();
-    return make(engine, device.lost, { name: "webgpu" });
+    try {
+      const unpacked = unpackModel(packed);
+      const engine = new PhononEngine(new GpuGraph(device, unpacked, subgroups), withoutWeights(unpacked), files.align);
+      await engine.ready();
+      return make(engine, device.lost, { name: "webgpu" }, async () => device.destroy());
+    } catch (error) {
+      device.destroy();
+      throw error;
+    }
+  }
+
+  /** Releases the model: its GPU device, or its CPU worker and threads. A text in progress
+   *  fails, and so does every later `speak`. */
+  async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    await this.release();
   }
 
   /** The catalog's voices in the model's languages. */
@@ -260,6 +279,7 @@ export class Phonon {
 
   /** Text to speech, in parts that fit the model, joined. */
   async speak(text: string, options: SpeakOptions = {}): Promise<Speech> {
+    if (this.closed) throw new Error("This model is closed.");
     const { voice = this.defaultVoice, speed = 1, seed = 1, onAudio, onWord, signal } = options;
     const v = this.catalog.find((c) => c.name === voice || c.id === voice);
     if (!v) throw new Error(`No voice ${voice}`);
@@ -301,13 +321,6 @@ export class Phonon {
     }
     return { audio: join(audio), sampleRate: SAMPLE_RATE, words, tokens };
   }
-}
-
-/** A model without its weights, once a backend holds them: the engine keeps only the tensors'
- *  places and the pace's vectors. */
-function light(m: PhononModel): PhononModel {
-  const pace = Object.fromEntries(Object.entries(m.pace).map(([k, v]) => [k, v.slice()])) as PhononModel["pace"];
-  return { tensors: m.tensors, pace, blob: new Uint8Array() };
 }
 
 function join(parts: Float32Array[]): Float32Array {

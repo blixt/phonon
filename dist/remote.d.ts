@@ -21,6 +21,8 @@ export type ToWorker = {
 } | {
     type: "cancel";
     id: number;
+} | {
+    type: "close";
 };
 export declare class CpuEngine implements Engine {
     /** Threads that take part in each op, this worker's included. */
@@ -40,6 +42,8 @@ export declare class CpuEngine implements Engine {
         layer: number;
         head: number;
     }, threads: number): Promise<CpuEngine>;
+    /** Ends the worker and its pool threads. Texts in progress fail, and so do later ones. */
+    close(): Promise<void>;
     hasVoice(name: string): boolean;
     synthesize(ids: number[], voice: string, options?: SynthesizeOptions): Promise<Synthesis | null>;
     private hear;

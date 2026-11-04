@@ -33,5 +33,8 @@ export declare function convertCheckpoint(buffer: ArrayBuffer): PhononModel;
  *  lengths), the pace vectors and the blob. */
 export declare function packModel(model: PhononModel): Uint8Array<ArrayBuffer>;
 export declare function unpackModel(buffer: ArrayBuffer): PhononModel;
+/** A model without its weights, once a backend holds them: the tensors' places and copies of the
+ *  pace's vectors, which are otherwise views into the whole packed file. */
+export declare function withoutWeights(m: PhononModel): PhononModel;
 /** A catalog voice file: its speaker latents as [125 frames][512]. */
 export declare function readVoice(buffer: ArrayBuffer): Float32Array<ArrayBuffer>;

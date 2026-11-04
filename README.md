@@ -90,7 +90,9 @@ const speech = await tts.speak("The birch canoe slid on the smooth planks.", {
 
 `onWord` gives the same words as `speech.words`, as soon as nothing still to come can change them. `tts.words(text)` lists the words and their tokens before speaking, so a page can lay them out first. The demo does that, and lights each word token by token while it is heard, so a long compound like "Donaudampfschifffahrtsgesellschaft" lights in pieces.
 
-`Phonon.load` runs on WebGPU when the browser gives it an adapter, and otherwise on the CPU, in a worker. `backend: "webgpu"` or `"cpu"` picks one, and `tts.backend` says which runs (on the CPU, with its threads and its WebAssembly build). The CPU uses threads only on a cross-origin isolated page, one served with `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`. Elsewhere it runs on one thread. `threads` sets how many, and by default it is one per core, at most 8. The first load downloads 44.3 MB from Hugging Face (the weights, the tokenizer and a voice), and later loads read them from the browser's cache. The CPU tier adds 26 KB (gzip) of its own code and WebAssembly, which loads only when it runs.
+`Phonon.load` runs on WebGPU when the browser gives it an adapter, and otherwise on the CPU, in a worker. `backend: "webgpu"` or `"cpu"` picks one, and `tts.backend` says which runs (on the CPU, with its threads and its WebAssembly build). The CPU uses threads only on a cross-origin isolated page, one served with `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`. Elsewhere it runs on one thread. `threads` sets how many, and by default it is one per core, at most 8. The first load downloads 44.3 MB from Hugging Face (the weights, the tokenizer and a voice), and later loads read them from the browser's cache. `tts.close()` releases a model: its GPU device, or its worker and threads.
+
+`dist/phonon.js` is 25,116 bytes with gzip. The CPU tier's files are in `dist/cpu`, and a page fetches them only when it runs on the CPU: the page's side of the engine (1,343 bytes with gzip), its worker (14,077 bytes) and one WebAssembly module (16,802 bytes, or 17,016 for the build without relaxed SIMD). Minified, as the demo serves them, the first two are 980 and 9,832 bytes.
 
 The code is in [src](src): [lm.ts](src/lm.ts) has the language model and [codec.ts](src/codec.ts) the audio decoder, as ops of a backend ([graph.ts](src/graph.ts)). [gpu.ts](src/gpu.ts) runs those ops on WebGPU with the WGSL shaders of [kernels.ts](src/kernels.ts), and [cpu.ts](src/cpu.ts) runs them in WebAssembly, with the Rust kernels of [cpu](cpu). [engine.ts](src/engine.ts) is the loop that drives either, and [timing.ts](src/timing.ts) makes the word times.
 
@@ -185,7 +187,7 @@ In order of their effect:
 4. No work on padding. A text's prefill marks its padding rows (`Gate` "text" in [graph.ts](src/graph.ts)), and the CPU skips them. WebGPU still computes them, as its prefill sizes are fixed, and its output is unchanged. This cut first audio of a sentence on one thread from 48 ms to 20 ms in the benchmark.
 5. int16 GEMV. An LM step's input is rounded to int16 with one scale per 32 values, and each row of int8 weights meets it in `i32x4.dot_i16x8_s`, 8 products per instruction. It made the GEMVs 1.7 to 2.3 times faster on the Ryzen, and speech 3% faster on the M3 Max (A/B).
 
-The threads need a cross-origin isolated page, and GitHub Pages cannot set headers. The demo registers a small service worker ([coi.js](site/coi.js)) that adds them, then reloads once. It does this only when it will speak on the CPU, so a visitor with WebGPU never gets it. On the M3 Max the reload makes the CPU tier about 5 times faster (37.5× on 8 threads against 7.0× on one), and the reload took 80 to 100 ms from a local server, on a first visit that downloads 44 MB anyway. A library user can set the headers on their own server, or run on one thread.
+The threads need a cross-origin isolated page, and GitHub Pages cannot set headers. The demo, when it finds no WebGPU adapter, registers a small service worker ([coi.js](site/coi.js)) that adds them, and moves to its own URL with `?cpu`. The service worker's scopes are that URL and the folder `cpu/` of the CPU tier's files, as a worker's script is matched by its own URL. It never controls the demo's plain URL, so a visitor with WebGPU is never controlled, isolated or reloaded, in any tab. A page that finds an adapter unregisters it, and a `?cpu` page with an adapter moves back to the plain URL. This was tested in headless Chrome in both orders, a visit without WebGPU then one with it and the reverse, and the CPU side in Firefox and WebKit. On the M3 Max the reload makes the CPU tier about 5 times faster (37.5× on 8 threads against 7.0× on one), and the reload took 80 to 100 ms from a local server, on a first visit that downloads 44 MB anyway. A library user can set the headers on their own server, or run on one thread.
 
 The CPU tier is checked against WebGPU and the reference:
 
@@ -196,7 +198,7 @@ The CPU tier is checked against WebGPU and the reference:
 - All five 40M models gave the same lengths as on WebGPU, and the same word times on 8 of 10 test sentences.
 - Chrome 153, Firefox 155 and WebKit (headless, on macOS) all ran it, threaded and not, and made the same audio to the bit.
 
-The CPU tier's memory is 115 MB for Phonon 31M and 139 MB for a 40M model, all in the module's memory: the weights (43.3 or 53.4 MB), the f32 key and value cache (25 or 38 MB), the codec's stages and the activations.
+The CPU tier's memory is 115 MB for Phonon 31M and 139 MB for a 40M model, in the module's memory: the weights (43.3 or 53.4 MB), the f32 key and value cache (25 or 38 MB), the codec's stages and the activations. The worker keeps no other copy of the weights: Chrome measured its whole worker at 116 MB with Phonon 31M on one thread.
 
 ### Word timings
 
@@ -309,15 +311,25 @@ node bench/run.mjs --first-runs 3 --runs 5 --runtimes ours,oursMultilingual,grad
 HF_LOCAL="gradium/phonon-40m-multilingual=path/to/download" node bench/drive.mjs "http://127.0.0.1:7893/bench/?device=mac"
 ```
 
-The CPU tier's run, and its checks against WebGPU and the reference (the WebAssembly modules come from `npm run build-cpu`, which needs Rust with the wasm32-unknown-unknown target and rust-src):
+The backend checks (bench/ops.mjs and bench/golden.mjs) run in headless Chrome with WebGPU, through the `playwright-core` dev dependency. Playwright's Chromium is a separate download, once:
+
+```sh
+npm install
+node node_modules/playwright-core/cli.js install chromium
+npm run build                               # dist/cpu holds the WebAssembly; npm run build-cpu rebuilds it with Rust
+npm run test-backends
+```
+
+`PLAYWRIGHT=/path/to/a/package.json` makes the bench scripts take `playwright-core` from another install. The CPU tier's run, and its parity with the reference:
 
 ```sh
 node bench/run.mjs --runs 5 --kinds cold,warm --runtimes oursCpu,oursCpu3,oursCpu1,gradiumCpu,gradiumCpu1 --audio none --out bench/results/cpu
 node bench/drive.mjs "http://127.0.0.1:7893/bench/?device=mac"
-npm run test-backends                       # bench/ops.mjs and bench/golden.mjs
 node bench/parity.mjs out/webgpu webgpu 1,2,3 && node bench/parity.mjs out/cpu cpu 1,2,3
 python bench/parity.py out/webgpu out/cpu
 ```
+
+`npm run build-cpu` rebuilds the WebAssembly modules, and needs Rust with the wasm32-unknown-unknown target and rust-src.
 
 ## Limits
 
