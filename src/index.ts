@@ -75,14 +75,35 @@ async function cached(url: string): Promise<ArrayBuffer> {
   return bytes.buffer;
 }
 
-/** The model's weights, from the cache, or downloaded (reporting progress) and kept. */
-async function weights(m: ModelFiles, progress: (percent: number) => void): Promise<PhononModel> {
+/** The model's packed weights (checkpoint.ts packModel), from the cache, or downloaded
+ *  (reporting progress) and kept. */
+async function weights(m: ModelFiles, progress: (percent: number) => void): Promise<ArrayBuffer> {
   const cache = await openCache();
   const hit = await cache?.match(m.weights);
-  if (hit) return unpackModel(await hit.arrayBuffer());
+  if (hit) return hit.arrayBuffer();
   const bytes = await download(m.weights, progress);
   await keep(cache, m.weights, bytes);
-  return unpackModel(bytes.buffer);
+  return bytes.buffer;
+}
+
+/** Where a model runs. */
+export interface Backend {
+  name: "webgpu" | "cpu";
+  /** On the CPU: threads that share each op's work, and the WebAssembly build ("relaxed" for
+   *  relaxed SIMD, else "simd"). */
+  threads?: number;
+  simd?: string;
+}
+
+export interface LoadOptions {
+  /** files.ts MODELS: Phonon 31M by default. */
+  model?: ModelId;
+  /** Hears the download in percent. */
+  progress?: (percent: number) => void;
+  /** "auto" (the default) runs on WebGPU when the browser gives an adapter, else on the CPU. */
+  backend?: "auto" | "webgpu" | "cpu";
+  /** CPU threads, when the page is cross-origin isolated: by default one per core, at most 8. */
+  threads?: number;
 }
 
 /** Text cut where it must be so each part fits the model's text window:
@@ -147,6 +168,7 @@ export class Phonon {
   private readonly catalog: Voice[];
   /** Settles when the GPU device is lost (a reset): load again to go on. */
   readonly lost: Promise<unknown>;
+  readonly backend: Backend;
 
   /** The voice `speak` uses when none is given: the default of the model's first language. */
   readonly defaultVoice: string;
@@ -160,7 +182,9 @@ export class Phonon {
     languages: Language[],
     lag: number,
     lost: Promise<unknown>,
+    backend: Backend,
   ) {
+    this.backend = backend;
     this.engine = engine;
     this.tokenizer = tokenizer;
     this.catalog = catalog;
@@ -169,19 +193,15 @@ export class Phonon {
     this.lost = lost;
   }
 
-  /** Loads a model (files.ts MODELS, Phonon 31M by default): a download the first time, then
-   *  the browser's cache. `progress` hears the download in percent. */
-  static async load({
-    model = "phonon-31m-en",
-    progress,
-  }: { model?: ModelId; progress?: (percent: number) => void } = {}): Promise<Phonon> {
+  /** Loads a model: a download the first time, then the browser's cache. It runs on WebGPU
+   *  when the browser has an adapter, else on the CPU, in a worker. */
+  static async load({ model = "phonon-31m-en", progress, backend = "auto", threads }: LoadOptions = {}): Promise<Phonon> {
     const files: ModelFiles = MODELS[model];
     const gpu = (navigator as Navigator & { gpu?: GPU }).gpu;
-    const adapter = await gpu?.requestAdapter({ powerPreference: "high-performance" }).catch(() => null);
-    if (!adapter) throw new Error("This browser has no WebGPU.");
-    const subgroups = subgroups32(adapter);
-    const device = await adapter.requestDevice({ requiredFeatures: subgroups ? ["subgroups"] : [] });
-    const [blob, tokenizer, catalog] = await Promise.all([
+    const adapter =
+      backend === "cpu" ? null : await gpu?.requestAdapter({ powerPreference: "high-performance" }).catch(() => null);
+    if (!adapter && backend === "webgpu") throw new Error("This browser has no WebGPU.");
+    const [packed, tokenizer, catalog] = await Promise.all([
       weights(files, progress ?? (() => {})),
       cached(tokenizerUrl(files)).then((b) => new Tokenizer(JSON.parse(new TextDecoder().decode(b)))),
       cached(CATALOG_URL).then((b) =>
@@ -201,9 +221,20 @@ export class Phonon {
           })),
       ),
     ]);
-    const engine = new PhononEngine(new GpuGraph(device, blob, subgroups), blob, files.align);
+    const make = (engine: Engine, lost: Promise<unknown>, b: Backend) =>
+      new Phonon(engine, tokenizer, catalog, files.languages, files.align.lag, lost, b);
+    if (!adapter) {
+      const { CpuEngine } = await import("./remote");
+      const cores = navigator.hardwareConcurrency || 1;
+      const engine = await CpuEngine.start(packed, files.align, threads ?? Math.min(8, cores));
+      return make(engine, new Promise(() => {}), { name: "cpu", threads: engine.threads, simd: engine.simd });
+    }
+    const subgroups = subgroups32(adapter);
+    const device = await adapter.requestDevice({ requiredFeatures: subgroups ? ["subgroups"] : [] });
+    const unpacked = unpackModel(packed);
+    const engine = new PhononEngine(new GpuGraph(device, unpacked, subgroups), light(unpacked), files.align);
     await engine.ready();
-    return new Phonon(engine, tokenizer, catalog, files.languages, files.align.lag, device.lost);
+    return make(engine, device.lost, { name: "webgpu" });
   }
 
   /** The catalog's voices in the model's languages. */
@@ -270,6 +301,13 @@ export class Phonon {
     }
     return { audio: join(audio), sampleRate: SAMPLE_RATE, words, tokens };
   }
+}
+
+/** A model without its weights, once a backend holds them: the engine keeps only the tensors'
+ *  places and the pace's vectors. */
+function light(m: PhononModel): PhononModel {
+  const pace = Object.fromEntries(Object.entries(m.pace).map(([k, v]) => [k, v.slice()])) as PhononModel["pace"];
+  return { tensors: m.tensors, pace, blob: new Uint8Array() };
 }
 
 function join(parts: Float32Array[]): Float32Array {

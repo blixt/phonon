@@ -13,12 +13,13 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --format=esm --target=es2022 --outfile=dist/phonon.js && npm run site && tsc -p tsconfig.build.json",
+    "build": "esbuild src/index.ts --bundle --format=esm --target=es2022 --outfile=dist/phonon.js && esbuild src/cpu-worker.ts --bundle --format=esm --target=es2022 --outfile=dist/phonon-cpu.js && npm run site && tsc -p tsconfig.build.json",
     "check": "tsc -p . --noEmit",
     "bench": "node bench/run.mjs",
     "test": "esbuild src/*.test.ts --bundle --platform=node --format=esm --outdir=.test --log-level=warning && node --test .test/",
     "build-weights": "esbuild scripts/build-weights.ts --bundle --platform=node --format=esm --outfile=.test/build-weights.mjs --log-level=warning && node .test/build-weights.mjs",
-    "site": "esbuild site/site.ts --bundle --format=esm --target=es2022 --minify --outfile=docs/site.js && esbuild scripts/build-site.ts --bundle --platform=node --format=esm --packages=external --outfile=.test/build-site.mjs --log-level=warning && node .test/build-site.mjs"
+    "site": "esbuild site/site.ts --bundle --format=esm --target=es2022 --minify --outfile=docs/site.js && esbuild scripts/build-site.ts --bundle --platform=node --format=esm --packages=external --outfile=.test/build-site.mjs --log-level=warning && node .test/build-site.mjs",
+    "build-cpu": "sh cpu/build.sh"
   },
   "devDependencies": {
     "esbuild": "^0.28.2",
