@@ -22,13 +22,13 @@ test("words reported while frames and audio arrive equal the words of the whole 
   const pieces = ["▁Die", "▁Donau", "dampf", "schiff", "fahrt", "▁fährt", "▁sch", "nell", "."];
   const n = pieces.length;
   const { rows, pcm } = take(n, 40);
-  const whole = new WordTimes(pieces);
+  const whole = new WordTimes(pieces, 3);
   whole.addRows(rows);
   whole.addAudio(pcm);
   const all = whole.finish();
 
   const streamed: Word[] = [];
-  const live = new WordTimes(pieces, (w) => streamed.push(w));
+  const live = new WordTimes(pieces, 3, (w) => streamed.push(w));
   // Rows ahead of audio in uneven pieces, as the engine's readbacks give them.
   let f = 0, a = 0;
   for (const step of [1, 1, 2, 4, 8, 8, 8, 8]) {

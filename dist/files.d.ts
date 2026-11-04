@@ -1,5 +1,10 @@
 export declare const MODEL_CACHE = "phonon-webgpu";
 export type Language = "en" | "fr" | "de" | "es" | "pt";
+export interface Align {
+    layer: number;
+    head: number;
+    lag: number;
+}
 /** Each language's default voice. Outside English, the one UTMOS rated highest, with no word
  *  errors, in its 40M model; in English, the benchmark's voice. */
 export declare const DEFAULT_VOICE: Record<Language, string>;
@@ -14,11 +19,9 @@ export interface ModelFiles {
     tokenizer: string;
     languages: Language[];
     license: string;
-    /** The attention head whose scores follow the text as it speaks: the word times. */
-    align: {
-        layer: number;
-        head: number;
-    };
+    /** The attention head whose scores follow the text as it speaks, and how many frames it reads
+     *  ahead of the audio: the word times. bench/heads.mjs finds both. */
+    align: Align;
 }
 export declare const MODELS: {
     "phonon-31m-en": {
@@ -33,6 +36,7 @@ export declare const MODELS: {
         align: {
             layer: number;
             head: number;
+            lag: number;
         };
     };
     "phonon-40m-en": ModelFiles;

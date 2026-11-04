@@ -150,11 +150,21 @@ export class Phonon {
   /** The voice `speak` uses when none is given: the default of the model's first language. */
   readonly defaultVoice: string;
 
-  private constructor(engine: PhononEngine, tokenizer: Tokenizer, catalog: Voice[], languages: Language[], lost: Promise<unknown>) {
+  private readonly lag: number;
+
+  private constructor(
+    engine: PhononEngine,
+    tokenizer: Tokenizer,
+    catalog: Voice[],
+    languages: Language[],
+    lag: number,
+    lost: Promise<unknown>,
+  ) {
     this.engine = engine;
     this.tokenizer = tokenizer;
     this.catalog = catalog;
     this.defaultVoice = DEFAULT_VOICE[languages[0]];
+    this.lag = lag;
     this.lost = lost;
   }
 
@@ -192,7 +202,7 @@ export class Phonon {
     ]);
     const engine = new PhononEngine(device, blob, { subgroups, align: files.align });
     await engine.ready();
-    return new Phonon(engine, tokenizer, catalog, files.languages, device.lost);
+    return new Phonon(engine, tokenizer, catalog, files.languages, files.align.lag, device.lost);
   }
 
   /** The catalog's voices in the model's languages. */
@@ -234,6 +244,7 @@ export class Phonon {
       const shiftWord = (w: Word): Word => ({ ...shift(w), tokens: w.tokens.map(shift) });
       const times = new WordTimes(
         ids.map((id) => this.tokenizer.pieces[id]),
+        this.lag,
         onWord && ((w) => onWord(shiftWord(w))),
       );
       const out = await this.engine.synthesize(ids, v.id, {

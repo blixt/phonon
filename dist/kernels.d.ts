@@ -41,7 +41,7 @@ export declare const UNIFORMS: {
     readonly rows: readonly ["rows", "pos0"];
     readonly embedRows: readonly ["eo", "eso", "bo"];
     readonly upsample: readonly ["T", "wo", "wso", "mo", "so"];
-    readonly shiftRows: readonly ["src", "count"];
+    readonly shiftRows: readonly ["T"];
     readonly gemm: readonly ["M", "yo", "ro", "rows", "wo", "bo", "wso"];
     readonly gemmReduce: readonly ["rows", "yo", "ro", "stride", "bo"];
     readonly gemv: readonly ["xo", "yo", "ro", "go", "so", "ho", "wo", "bo", "vo", "lgo", "lbo", "wso"];
@@ -115,8 +115,13 @@ export declare function noise(): string;
 /** Codec input: denormalize latents and run the folded latent_proj + depthwise upsample (int8),
  *  for the chunk starting at the state's codec position (200 Hz). */
 export declare function upsample(): string;
-/** Moves the last `ctx` rows of a stage buffer to its front, for the next chunk. */
-export declare function shiftRows(): string;
+/** Moves every stage's left context to its front in one dispatch. Stages are independent;
+ *  each source starts after its destination, so no invocation can overwrite another's input. */
+export declare function shiftRows(stages: {
+    ctx: number;
+    rate: number;
+    ch: number;
+}[]): string;
 /** GEMM: 64x64 tiles, K in steps of 32, optional split-K. With splits > 1 it writes raw
  *  partial sums, and gemmReduce finishes them. A convolution reads its input stage from row 0,
  *  where its (k - 1) * dil rows of left context begin; a transposed one has one row of context

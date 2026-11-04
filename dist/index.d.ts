@@ -41,6 +41,7 @@ export declare class Phonon {
     readonly lost: Promise<unknown>;
     /** The voice `speak` uses when none is given: the default of the model's first language. */
     readonly defaultVoice: string;
+    private readonly lag;
     private constructor();
     /** Loads a model (files.ts MODELS, Phonon 31M by default): a download the first time, then
      *  the browser's cache. `progress` hears the download in percent. */

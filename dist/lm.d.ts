@@ -26,6 +26,8 @@ export declare function layerRows(g: Graph, pre: string, o: {
     vc: GPUBuffer;
     cache: K.Cache;
     pos0: number;
+    /** A voice's last layer needs only its keys and values. */
+    kvOnly?: boolean;
     out?: {
         buf: GPUBuffer;
         yo: number;

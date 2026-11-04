@@ -54,13 +54,15 @@ export function layerRows(
     vc: GPUBuffer;
     cache: K.Cache;
     pos0: number;
+    /** A voice's last layer needs only its keys and values. */
+    kvOnly?: boolean;
     out?: { buf: GPUBuffer; yo: number };
   },
 ): Op[] {
   const { B, rows, cache } = o;
   const gate = cache.kind === "codec" ? "chunk" : "none";
   const at = g.u(K.UNIFORMS.rows, { rows, pos0: o.pos0 });
-  return [
+  const kv = [
     g.layernorm(B.x, B.h, rows, `${pre}.ln1.w`, `${pre}.ln1.b`, LN_EPS, gate),
     ...g.gemm(B.h, `${pre}.qkv`, B.qkv, { M: rows, K: H, N: 3 * H, gate }),
     g.op(
@@ -68,6 +70,10 @@ export function layerRows(
       [B.qkv, B.q, o.kc, o.vc, g.state, at],
       [rows, 1, 1],
     ),
+  ];
+  if (o.kvOnly) return kv;
+  return [
+    ...kv,
     g.op(
       K.attention({ cache }),
       [B.q, o.kc, o.vc, B.att, g.state, at],
@@ -143,7 +149,7 @@ export class LanguageModel {
     this.step = [...Array.from({ length: depth }, (_, i) => this.stepLayer(i)).flat(), ...this.tail];
     this.voiceOps = [
       ...g.gemm(this.voiceIn, "prompt_proj", this.rows.x, { M: PROMPT, K: H, N: H, gate: "none" }),
-      ...this.layers(PROMPT, 0),
+      ...this.layers(PROMPT),
     ];
     const em = g.q8("embed");
     this.prefills = new Map(
@@ -160,7 +166,7 @@ export class LanguageModel {
             ],
             [(n * H) / 256, 1, 1],
           ),
-          ...this.layers(n, PROMPT, true),
+          ...this.layers(n, PROMPT),
         ],
       ]),
     );
@@ -168,7 +174,7 @@ export class LanguageModel {
 
   /** The layers over `rows` rows from position `pos0`, in the prefill's way, and for a text's
    *  prefill frame 0's alignment row. */
-  private layers(rows: number, pos0: number, text = false): Op[] {
+  private layers(rows: number, pos0 = 0): Op[] {
     const { g } = this;
     return Array.from({ length: this.depth }, (_, i) => [
       ...layerRows(g, `l${i}`, {
@@ -178,8 +184,9 @@ export class LanguageModel {
         vc: this.vc[i],
         cache: { kind: "lm" },
         pos0,
+        kvOnly: !pos0 && i === this.depth - 1,
       }),
-      ...(text && i === this.alignLayer
+      ...(pos0 && i === this.alignLayer
         ? [g.op(K.alignRow(this.alignAt), [this.rows.q, this.kc[i], this.align, g.state], [1, 1, 1])]
         : []),
     ]).flat();

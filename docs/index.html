@@ -344,11 +344,11 @@ const speech = await tts.speak(&quot;Le petit chat dort au soleil près de la fe
 <ol>
 <li>The whole autoregressive loop stays on the GPU. A 32-byte state buffer holds the position the next step reads, the frame it makes, the end of speech and the codec&#39;s position (<code>STATE</code> in <a href="https://github.com/blixt/phonon/blob/main/src/kernels.ts">kernels.ts</a>), and each step&#39;s last kernel moves it on. The page encodes many steps into one submit without reading anything back. Results come back through mapped staging buffers, up to 3 submits behind the GPU.</li>
 <li>One GEMV kernel does every single-row matrix product. 32 lanes work on each output row, each lane loads 16 bytes of weights at a time, and the lanes sum with subgroup operations where every subgroup has exactly 32 lanes (Apple and NVIDIA). Other GPUs use a shared-memory reduction, which is also tested. LayerNorm, with its affine weights and the flow head&#39;s adaLN modulation, runs as the GEMV&#39;s prologue in one pass (sum and sum of squares). Together with the int8 weights, this GEMV cuts the language model&#39;s step from 0.65 ms to 0.30 ms (A/B).</li>
-<li>Each voice is prefilled once. A voice is 125 rows of speaker latents. The engine runs them through the language model&#39;s layers once and keeps their keys and values (1.5 MB in f16 for the 6 layers of Phonon 31M), and each text copies them into the cache and prefills only its own tokens. This cuts first audio from 8.8 ms to 4.9 ms (A/B).</li>
+<li>Each voice is prefilled once. A voice is 125 rows of speaker latents. The engine runs them through the language model&#39;s layers once (the last layer only as far as its keys and values) and keeps their keys and values (1.5 MB in f16 for the 6 layers of Phonon 31M), and each text copies them into the cache and prefills only its own tokens. This cuts first audio from 8.8 ms to 4.9 ms (A/B).</li>
 <li>Nothing is allocated per request. All buffers and bind groups exist from the start: about 108 MB with Phonon 31M, plus 1.5 MB for each voice used. The key/value cache is f16.</li>
 <li>A step&#39;s attention is split over the keys (flash-decoding). 8 workgroups per head each take a share of the keys and leave a partial sum with its maximum, and the output projection&#39;s GEMV merges the splits in its prologue, at no extra dispatch. Inside a split, 8 lanes share each key for the scores, and 16 lanes × 8 key groups make the values. This halves a layer&#39;s attention, from 30 µs to 15 µs (A/B).</li>
 <li>The GPU decides the end of speech. The step&#39;s last kernel computes the end-of-speech logit, and when it passes 4.0 the kernel writes how many frames to keep. Every heavy kernel reads that number and returns at once for later frames, which makes the steps a submit runs past the end cost about 2 µs each. On short texts, this raises the speed from 115× to 130× (A/B).</li>
-<li>Audio comes out in chunks of 1, 2, 4 and then 8 frames. All chunk sizes share one decoder state: the codec transformer&#39;s ring of keys and values (window 251, ring 512 positions at 200 Hz) and each convolution stage&#39;s left context. After each chunk, a small kernel moves each stage&#39;s last rows to its front, and the convolutions never need a position. The engine clears that context before each text. Chunk size does not change the audio in my tests, though the repository has no test for it.</li>
+<li>Audio comes out in chunks of 1, 2, 4 and then 8 frames. All chunk sizes share one decoder state: the codec transformer&#39;s ring of keys and values (window 251, ring 512 positions at 200 Hz) and each convolution stage&#39;s left context. After each chunk, one small kernel moves every stage&#39;s last rows to its front, and the convolutions never need a position. The engine clears that context before each text. Chunk size does not change the audio in my tests, though the repository has no test for it.</li>
 <li>Pipelines compile in the background. Each bind group layout is read from its shader&#39;s <code>@binding</code> declarations, which lets bind groups exist before <code>createComputePipelineAsync</code> finishes. This cuts the first request after a load from about 53 ms to 13-19 ms (A/B).</li>
 <li>The prefill has 4 fixed sizes. The text and BOS rows are padded to 64, 128, 192 or 256 rows, each size has prebuilt operations, and a text only writes its ids. Padding rows cannot change the real rows, because attention is causal. Each padding row writes keys and values at a position after BOS, and the step at that position writes its own key and value before it reads the cache. After the prefill, the BOS row is copied to row 0, where the step&#39;s flow head reads.</li>
 <li>The codec&#39;s convolutions are split-K GEMMs with 64×64 tiles, A and B in shared memory as vec4 along K (16 KB, the portable limit). When a GEMM has few output tiles, K is split to reach about 160 workgroups and a second kernel sums the parts. Row tiles are capped at 4 when choosing the splits, so all text lengths share a few shader variants.</li>
@@ -360,17 +360,17 @@ const speech = await tts.speak(&quot;Le petit chat dort au soleil près de la fe
 <li>Find a head that follows the text. I ran the reference on four texts and recorded each head&#39;s attention over the text tokens at every 80 ms frame. Each head got a score: the correlation between the frame number and the token it attends most, times the share of frames that do not move back, times its mean peak attention. Layer 3, head 0 scored 0.78. The next best (layer 3, head 5) scored 0.45, and all others 0.15 or less. Layer 3, head 0 has a correlation of 0.99 or more, never moves back and puts about 80% of its attention on one token.</li>
 <li>Record it on the GPU. In every step, the layer 3 attention kernel writes head 0&#39;s scores over the text tokens into an alignment buffer, one row per frame. A small extra kernel in the prefill writes frame 0&#39;s row from the BOS row&#39;s query. The rows of each submit&#39;s frames come back with its audio, in the readback the engine makes anyway, about 1 KB per frame.</li>
 <li>Turn the scores into a position. For each frame, take the token with the highest score and average the token index over the 2 tokens on each side of it, with softmax weights. The position never moves back. Frame 0&#39;s position counts no further than frame 1&#39;s: frame 0&#39;s row comes from the end-of-text query, and in some 40M models that query reads the last token, which would pin every word to the start.</li>
-<li>Correct the lead. The head reaches a word about 230 ms (about 3 frames) before the audio does, and the times shift back by 3 frames. After a pause, the head reaches the next word 400 to 570 ms early, because it moves on when the previous word ends. A word start that falls where the audio is quieter than −45 dB (in 10 ms steps) moves to where the sound begins.</li>
+<li>Correct the lead. The head reaches a word a few frames before the audio does, and the times shift back by the model&#39;s lag: 3 frames (240 ms), or 2 frames for the German 40M model. After a pause, the head reaches the next word 400 to 570 ms early, because it moves on when the previous word ends. A word start that falls where the audio is quieter than −45 dB (in 10 ms steps) moves to where the sound begins.</li>
 <li>Group the tokens into words. A token that starts with ▁ starts a word, unless it is only punctuation.</li>
 <li>Report each word once nothing still to come can change it. Every step looks only at earlier frames and audio, except three short looks ahead: interpolation needs the next frame, the silence step needs the audio up to where sound begins, and a word&#39;s end is the next word&#39;s start. <a href="https://github.com/blixt/phonon/blob/main/src/timing.ts">timing.ts</a> takes frames and audio as they arrive and reports a word as soon as the token after it has its start. A whole text goes through the same code, and on 47 texts in all seven models (814 words) the words reported while speaking equalled the words of the finished text. A word&#39;s end waits for the next word&#39;s start, and the last word waits for the end of the text. With audio made much faster than real time, a word arrives before it is heard. A long word, or a device that makes audio only a little faster than real time, can make it arrive after its sound has begun.</li>
 </ol>
 <p>I chose the 3-frame shift and the −45 dB threshold on 110 words of four other texts. On those words, a 4-frame shift without the silence step was a mean 110 ms from a wav2vec2 forced aligner, and the chosen settings were about 55 ms. The figure above is a held-out check on the 11 benchmark texts in 4 voices (712 words). Word starts are a mean 67 ms and a median 65 ms from the aligner, 76% are within 100 ms, and the 90th percentile is 125 ms. The median signed difference is +40 ms, with the engine later. Only word starts were scored here, and the aligner has its own error of a few tens of milliseconds. The &quot;never move back&quot; rule could also hide a repeated or skipped word.</p>
-<p>Each 40M model has its own head, and <a href="https://github.com/blixt/phonon/blob/main/src/files.ts">files.ts</a> names it. To find it, the engine spoke 4 other texts in the model&#39;s language once with each of the 72 heads (9 layers of 8), with the same shift and threshold. A forced aligner then scored the word starts: <a href="https://huggingface.co/facebook/wav2vec2-base-960h">wav2vec2</a> in English, and <a href="https://pytorch.org/audio/stable/generated/torchaudio.pipelines.MMS_FA.html">MMS</a> on romanized text in all five languages. Both aligners scored the multilingual model&#39;s English within 2 ms of each other. In each model one head was best by far:</p>
+<p>Each 40M model has its own head and lag, and <a href="https://github.com/blixt/phonon/blob/main/src/files.ts">files.ts</a> names them. <a href="https://github.com/blixt/phonon/blob/main/bench/heads.mjs">bench/heads.mjs</a> speaks 4 other texts in the model&#39;s language once with each of the 72 heads (9 layers of 8) and replays the word times at several lags. <a href="https://github.com/blixt/phonon/blob/main/bench/heads.py">bench/heads.py</a> scores them against <a href="https://pytorch.org/audio/stable/generated/torchaudio.pipelines.MMS_FA.html">MMS</a> forced alignment of romanized text, which works in all five languages and scored the multilingual model&#39;s English within 2 ms of <a href="https://huggingface.co/facebook/wav2vec2-base-960h">wav2vec2</a>. The head is the one with the lowest mean word-start error at lag 3. Another lag replaces 3 only when it is no worse on any measure (mean, median, 90th percentile and share within 80 ms, of word starts and of tokens inside words) and better on the mean. That is German&#39;s lag of 2, which also held in each voice and on held-out text. For the other models, every other lag made some measure worse. In each model one head was best by far:</p>
 <div class="table"><table>
 <thead>
 <tr>
 <th>Model</th>
-<th>Head (layer, head)</th>
+<th>Head (layer, head), lag</th>
 <th>Search: next best</th>
 <th align="right">Held out: mean, median</th>
 <th align="right">Within 100 ms</th>
@@ -378,42 +378,42 @@ const speech = await tts.speak(&quot;Le petit chat dort au soleil près de la fe
 </thead>
 <tbody><tr>
 <td><code>phonon-40m-en</code></td>
-<td>6, 0</td>
+<td>6, 0, 3</td>
 <td>3, 4</td>
 <td align="right">65 ms, 66 ms</td>
 <td align="right">79%</td>
 </tr>
 <tr>
 <td><code>phonon-40m-fr</code></td>
-<td>4, 1</td>
+<td>4, 1, 3</td>
 <td>4, 4</td>
 <td align="right">42 ms, 32 ms</td>
 <td align="right">93%</td>
 </tr>
 <tr>
 <td><code>phonon-40m-de</code></td>
-<td>3, 5</td>
+<td>3, 5, 2</td>
 <td>3, 3</td>
-<td align="right">76 ms, 77 ms</td>
-<td align="right">71%</td>
+<td align="right">39 ms, 31 ms</td>
+<td align="right">93%</td>
 </tr>
 <tr>
 <td><code>phonon-40m-es</code></td>
-<td>4, 6</td>
+<td>4, 6, 3</td>
 <td>4, 4</td>
 <td align="right">60 ms, 58 ms</td>
 <td align="right">85%</td>
 </tr>
 <tr>
 <td><code>phonon-40m-pt</code></td>
-<td>4, 2</td>
+<td>4, 2, 3</td>
 <td>4, 5</td>
 <td align="right">58 ms, 55 ms</td>
 <td align="right">86%</td>
 </tr>
 <tr>
 <td><code>phonon-40m-multilingual</code></td>
-<td>4, 1</td>
+<td>4, 1, 3</td>
 <td>4, 4</td>
 <td align="right">35 to 57 ms by language</td>
 <td align="right">84 to 97%</td>
@@ -444,9 +444,9 @@ const speech = await tts.speak(&quot;Le petit chat dort au soleil près de la fe
 </tr>
 <tr>
 <td><code>phonon-40m-de</code></td>
-<td align="right">77 ms, 77 ms</td>
-<td align="right">96 ms, 101 ms</td>
-<td align="right">+100 ms</td>
+<td align="right">39 ms, 31 ms</td>
+<td align="right">45 ms, 35 ms</td>
+<td align="right">+20 ms</td>
 </tr>
 <tr>
 <td><code>phonon-40m-es</code></td>
@@ -461,7 +461,7 @@ const speech = await tts.speak(&quot;Le petit chat dort au soleil près de la fe
 <td align="right">+52 ms</td>
 </tr>
 </tbody></table></div>
-<p>Most of the error is the engine being late by a similar amount for every token of a model, not scatter.</p>
+<p>Much of the rest is a steady late offset in a model, not scatter: Spanish tokens inside words are a median 90 ms late. For those models, a lag that would remove it makes another measure worse.</p>
 <h3 id="sampling">Sampling</h3>
 <p>The flow head&#39;s noise comes from a PCG hash of the seed, the frame and the channel, through Box-Muller, at temperature 0.3. phonon-tts and the reference use other random number generators, and the same seed gives a different take of the same text.</p>
 <p>A text ends when the end-of-speech logit passes 4.0, plus 1 frame, or 3 frames for a text of at most 4 words, as the checkpoint&#39;s <code>processor_config.json</code> says. A text gets at most (tokens / 3 + 2) seconds of frames, as in the reference, and never more than 768 frames (61 s). One text can have up to 240 tokens. <a href="https://github.com/blixt/phonon/blob/main/src/index.ts">index.ts</a> cuts longer texts at sentence ends, then at word ends, and joins the parts and their word times. Each part gets the next seed, because the noise depends on the seed and the frame, and each part starts again at frame 0.</p>

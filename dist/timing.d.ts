@@ -21,6 +21,8 @@ export declare class WordTimes {
     private readonly pieces;
     private readonly ranges;
     private readonly onWord?;
+    /** Frames the head reads ahead of the audio. */
+    private readonly lag;
     /** Each frame's position before the never-back rule, and after it (pos[0] waits for frame 1). */
     private readonly raw;
     private readonly pos;
@@ -35,7 +37,7 @@ export declare class WordTimes {
     private readonly at;
     private emitted;
     private ended;
-    constructor(pieces: string[], onWord?: (word: Word) => void);
+    constructor(pieces: string[], lag: number, onWord?: (word: Word) => void);
     /** Alignment rows of the next frames, `pieces.length` scores each. */
     addRows(rows: Float32Array): void;
     /** The next samples of the text's audio. */

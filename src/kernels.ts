@@ -39,7 +39,7 @@ export const UNIFORMS = {
   rows: ["rows", "pos0"],
   embedRows: ["eo", "eso", "bo"],
   upsample: ["T", "wo", "wso", "mo", "so"],
-  shiftRows: ["src", "count"],
+  shiftRows: ["T"],
   gemm: ["M", "yo", "ro", "rows", "wo", "bo", "wso"],
   gemmReduce: ["rows", "yo", "ro", "stride", "bo"],
   gemv: ["xo", "yo", "ro", "go", "so", "ho", "wo", "bo", "vo", "lgo", "lbo", "wso"],
@@ -366,17 +366,27 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }`;
 }
 
-/** Moves the last `ctx` rows of a stage buffer to its front, for the next chunk. */
-export function shiftRows(): string {
+/** Moves every stage's left context to its front in one dispatch. Stages are independent;
+ *  each source starts after its destination, so no invocation can overwrite another's input. */
+export function shiftRows(stages: { ctx: number; rate: number; ch: number }[]): string {
+  let offset = 0;
+  const copies = stages.map(({ ctx, rate, ch }, i) => {
+    const start = offset;
+    offset += ctx * ch;
+    return `if (gid.x < ${offset}u) {
+    let j = gid.x - ${start}u;
+    b${i}[j] = b${i}[p.T * ${rate * ch}u + j];
+    return;
+  }`;
+  });
   return `
 ${struct(UNIFORMS.shiftRows)}
-@group(0) @binding(0) var<storage, read_write> b: array<f32>;
-@group(0) @binding(1) var<uniform> p: P;
+${stages.map((_, i) => `@group(0) @binding(${i}) var<storage, read_write> b${i}: array<f32>;`).join("\n")}
+@group(0) @binding(${stages.length}) var<uniform> p: P;
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  _ = &b;
-  if (gid.x >= p.count) { return; }
-  b[gid.x] = b[p.src + gid.x];
+  ${stages.map((_, i) => `_ = &b${i};`).join(" ")}
+  ${copies.join("\n  ")}
 }`;
 }
 

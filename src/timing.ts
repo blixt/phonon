@@ -1,13 +1,11 @@
 // Word and token times from an alignment head of Phonon's LM (files.ts names each model's). Each
-// 80 ms frame's scores over the text give a position in it. The head reads about 3 frames
-// (240 ms) ahead of what is heard, and a start that falls in silence moves to where the sound
-// begins. WordTimes takes the frames and the audio as they are made and reports each word as soon
+// 80 ms frame's scores over the text give a position in it. The head reads a few frames ahead of
+// what is heard (its lag, also in files.ts), and a start that falls in silence moves to where the
+// sound begins. WordTimes takes the frames and the audio as they are made and reports each word as soon
 // as nothing still to come can change its times. It is the only path: a whole text is the same
 // calls at once.
 export const SAMPLE_RATE = 24000;
 const FRAME_SECS = 0.08;
-/** Frames the alignment head reads ahead of the audio. */
-const LAG = 3;
 /** Quieter than this (dB) is silence. */
 const SILENT_DB = -45;
 /** Samples per loudness window (10 ms). */
@@ -48,6 +46,8 @@ export class WordTimes {
   private readonly pieces: string[];
   private readonly ranges: { text: string; from: number; to: number }[];
   private readonly onWord?: (word: Word) => void;
+  /** Frames the head reads ahead of the audio. */
+  private readonly lag: number;
   /** Each frame's position before the never-back rule, and after it (pos[0] waits for frame 1). */
   private readonly raw: number[] = [];
   private readonly pos: number[] = [];
@@ -63,8 +63,9 @@ export class WordTimes {
   private emitted = 0;
   private ended = false;
 
-  constructor(pieces: string[], onWord?: (word: Word) => void) {
+  constructor(pieces: string[], lag: number, onWord?: (word: Word) => void) {
     this.pieces = pieces;
+    this.lag = lag;
     this.ranges = wordRanges(pieces);
     this.onWord = onWord;
     this.starts = Array.from({ length: pieces.length }, () => null);
@@ -131,7 +132,7 @@ export class WordTimes {
   /** The head's position heard at time t, or null while frames still to come could change it. */
   private posAt(t: number): number | null {
     const { pos } = this;
-    const g = (t - FRAME_SECS / 2) / FRAME_SECS - LAG;
+    const g = (t - FRAME_SECS / 2) / FRAME_SECS - this.lag;
     if (!pos.length) return null;
     if (g <= 0) return pos[0];
     if (this.ended && g >= pos.length - 1) return pos[pos.length - 1];

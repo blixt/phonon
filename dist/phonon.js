@@ -51,7 +51,7 @@ var UNIFORMS = {
   rows: ["rows", "pos0"],
   embedRows: ["eo", "eso", "bo"],
   upsample: ["T", "wo", "wso", "mo", "so"],
-  shiftRows: ["src", "count"],
+  shiftRows: ["T"],
   gemm: ["M", "yo", "ro", "rows", "wo", "bo", "wso"],
   gemmReduce: ["rows", "yo", "ro", "stride", "bo"],
   gemv: ["xo", "yo", "ro", "go", "so", "ho", "wo", "bo", "vo", "lgo", "lbo", "wso"],
@@ -308,16 +308,25 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   y[tl * 512u + c] = acc;
 }`;
 }
-function shiftRows() {
+function shiftRows(stages) {
+  let offset = 0;
+  const copies = stages.map(({ ctx, rate, ch }, i) => {
+    const start = offset;
+    offset += ctx * ch;
+    return `if (gid.x < ${offset}u) {
+    let j = gid.x - ${start}u;
+    b${i}[j] = b${i}[p.T * ${rate * ch}u + j];
+    return;
+  }`;
+  });
   return `
 ${struct(UNIFORMS.shiftRows)}
-@group(0) @binding(0) var<storage, read_write> b: array<f32>;
-@group(0) @binding(1) var<uniform> p: P;
+${stages.map((_, i) => `@group(0) @binding(${i}) var<storage, read_write> b${i}: array<f32>;`).join("\n")}
+@group(0) @binding(${stages.length}) var<uniform> p: P;
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  _ = &b;
-  if (gid.x >= p.count) { return; }
-  b[gid.x] = b[p.src + gid.x];
+  ${stages.map((_, i) => `_ = &b${i};`).join(" ")}
+  ${copies.join("\n  ")}
 }`;
 }
 function gemm({
@@ -839,14 +848,14 @@ var MODELS = {
     tokenizer: "tokenizer.5.0.0.json",
     languages: ["en"],
     license: "Apache-2.0",
-    align: { layer: 3, head: 0 }
+    align: { layer: 3, head: 0, lag: 3 }
   },
-  "phonon-40m-en": fortyM("phonon-40m-en", "bc7e8ae7e543a7a3e4604753e42fbda76ddf0781", ["en"], { layer: 6, head: 0 }),
-  "phonon-40m-fr": fortyM("phonon-40m-fr", "d91086970206b88efd2c88ca971d0628b5968f0f", ["fr"], { layer: 4, head: 1 }),
-  "phonon-40m-de": fortyM("phonon-40m-de", "79cfc7b47fcfc0b666657b981eb366415023a862", ["de"], { layer: 3, head: 5 }),
-  "phonon-40m-es": fortyM("phonon-40m-es", "e5e052b26e31abd5918ade71d3135e69d51a66f8", ["es"], { layer: 4, head: 6 }),
-  "phonon-40m-pt": fortyM("phonon-40m-pt", "4cbfd742a1555d60eb5399c6d296e9f2e07389e9", ["pt"], { layer: 4, head: 2 }),
-  "phonon-40m-multilingual": fortyM("phonon-40m-multilingual", "1537ce46c64f42903e0d608b132ccb073dac46d2", ["en", "fr", "de", "es", "pt"], { layer: 4, head: 1 })
+  "phonon-40m-en": fortyM("phonon-40m-en", "bc7e8ae7e543a7a3e4604753e42fbda76ddf0781", ["en"], { layer: 6, head: 0, lag: 3 }),
+  "phonon-40m-fr": fortyM("phonon-40m-fr", "d91086970206b88efd2c88ca971d0628b5968f0f", ["fr"], { layer: 4, head: 1, lag: 3 }),
+  "phonon-40m-de": fortyM("phonon-40m-de", "79cfc7b47fcfc0b666657b981eb366415023a862", ["de"], { layer: 3, head: 5, lag: 2 }),
+  "phonon-40m-es": fortyM("phonon-40m-es", "e5e052b26e31abd5918ade71d3135e69d51a66f8", ["es"], { layer: 4, head: 6, lag: 3 }),
+  "phonon-40m-pt": fortyM("phonon-40m-pt", "4cbfd742a1555d60eb5399c6d296e9f2e07389e9", ["pt"], { layer: 4, head: 2, lag: 3 }),
+  "phonon-40m-multilingual": fortyM("phonon-40m-multilingual", "1537ce46c64f42903e0d608b132ccb073dac46d2", ["en", "fr", "de", "es", "pt"], { layer: 4, head: 1, lag: 3 })
 };
 var tokenizerUrl = (m) => m.tokenizer.startsWith("https:") ? m.tokenizer : hubFile(m.source.repo, m.source.revision, m.tokenizer);
 var VOICES_REPO = "gradium/phonon-voices";
@@ -1128,14 +1137,18 @@ function layerRows(g, pre, o) {
   const { B, rows, cache } = o;
   const gate = cache.kind === "codec" ? "chunk" : "none";
   const at = g.u(UNIFORMS.rows, { rows, pos0: o.pos0 });
-  return [
+  const kv = [
     g.layernorm(B.x, B.h, rows, `${pre}.ln1.w`, `${pre}.ln1.b`, LN_EPS, gate),
     ...g.gemm(B.h, `${pre}.qkv`, B.qkv, { M: rows, K: H2, N: 3 * H2, gate }),
     g.op(
       ropeKV({ theta: ROPE_THETA, cache }),
       [B.qkv, B.q, o.kc, o.vc, g.state, at],
       [rows, 1, 1]
-    ),
+    )
+  ];
+  if (o.kvOnly) return kv;
+  return [
+    ...kv,
     g.op(
       attention({ cache }),
       [B.q, o.kc, o.vc, B.att, g.state, at],
@@ -1209,7 +1222,7 @@ var LanguageModel = class {
     this.step = [...Array.from({ length: depth }, (_, i) => this.stepLayer(i)).flat(), ...this.tail];
     this.voiceOps = [
       ...g.gemm(this.voiceIn, "prompt_proj", this.rows.x, { M: PROMPT, K: H2, N: H2, gate: "none" }),
-      ...this.layers(PROMPT, 0)
+      ...this.layers(PROMPT)
     ];
     const em = g.q8("embed");
     this.prefills = new Map(
@@ -1226,14 +1239,14 @@ var LanguageModel = class {
             ],
             [n * H2 / 256, 1, 1]
           ),
-          ...this.layers(n, PROMPT, true)
+          ...this.layers(n, PROMPT)
         ]
       ])
     );
   }
   /** The layers over `rows` rows from position `pos0`, in the prefill's way, and for a text's
    *  prefill frame 0's alignment row. */
-  layers(rows, pos0, text = false) {
+  layers(rows, pos0 = 0) {
     const { g } = this;
     return Array.from({ length: this.depth }, (_, i) => [
       ...layerRows(g, `l${i}`, {
@@ -1242,9 +1255,10 @@ var LanguageModel = class {
         kc: this.kc[i],
         vc: this.vc[i],
         cache: { kind: "lm" },
-        pos0
+        pos0,
+        kvOnly: !pos0 && i === this.depth - 1
       }),
-      ...text && i === this.alignLayer ? [g.op(alignRow(this.alignAt), [this.rows.q, this.kc[i], this.align, g.state], [1, 1, 1])] : []
+      ...pos0 && i === this.alignLayer ? [g.op(alignRow(this.alignAt), [this.rows.q, this.kc[i], this.align, g.state], [1, 1, 1])] : []
     ]).flat();
   }
   /** A voice's prompt rows through every layer, its keys and values kept in a new buffer. */
@@ -1513,15 +1527,10 @@ var Codec = class {
         ...conv("s3r2", s3h, s3r, { cin: 32, cout: 64, k: 1, elu: true, res: s3 }),
         ...conv("s4", s3r, this.audio, { cin: 64, cout: 1, k: 3, elu: true }),
         // Each stage keeps its last rows as the next chunk's left context.
-        ...this.stages.map(
-          (st) => g.op(
-            shiftRows(),
-            [
-              st.buf,
-              g.u(UNIFORMS.shiftRows, { src: st.rate * T2 * st.ch, count: st.ctx * st.ch })
-            ],
-            [Math.ceil(st.ctx * st.ch / 256), 1, 1]
-          )
+        g.op(
+          shiftRows(this.stages),
+          [...this.stages.map((st) => st.buf), g.u(UNIFORMS.shiftRows, { T: T2 })],
+          [Math.ceil(this.stages.reduce((n, st) => n + st.ctx * st.ch, 0) / 256), 1, 1]
         )
       ];
     };
@@ -1717,7 +1726,6 @@ var PhononEngine = class {
 // src/timing.ts
 var SAMPLE_RATE = 24e3;
 var FRAME_SECS = 0.08;
-var LAG = 3;
 var SILENT_DB = -45;
 var HOP = SAMPLE_RATE / 100;
 var STEP_SECS = 5e-3;
@@ -1738,6 +1746,8 @@ var WordTimes = class {
   pieces;
   ranges;
   onWord;
+  /** Frames the head reads ahead of the audio. */
+  lag;
   /** Each frame's position before the never-back rule, and after it (pos[0] waits for frame 1). */
   raw = [];
   pos = [];
@@ -1752,8 +1762,9 @@ var WordTimes = class {
   at = [];
   emitted = 0;
   ended = false;
-  constructor(pieces, onWord) {
+  constructor(pieces, lag, onWord) {
     this.pieces = pieces;
+    this.lag = lag;
     this.ranges = wordRanges(pieces);
     this.onWord = onWord;
     this.starts = Array.from({ length: pieces.length }, () => null);
@@ -1814,7 +1825,7 @@ var WordTimes = class {
   /** The head's position heard at time t, or null while frames still to come could change it. */
   posAt(t) {
     const { pos } = this;
-    const g = (t - FRAME_SECS / 2) / FRAME_SECS - LAG;
+    const g = (t - FRAME_SECS / 2) / FRAME_SECS - this.lag;
     if (!pos.length) return null;
     if (g <= 0) return pos[0];
     if (this.ended && g >= pos.length - 1) return pos[pos.length - 1];
@@ -2026,11 +2037,13 @@ var Phonon = class _Phonon {
   lost;
   /** The voice `speak` uses when none is given: the default of the model's first language. */
   defaultVoice;
-  constructor(engine, tokenizer, catalog, languages, lost) {
+  lag;
+  constructor(engine, tokenizer, catalog, languages, lag, lost) {
     this.engine = engine;
     this.tokenizer = tokenizer;
     this.catalog = catalog;
     this.defaultVoice = DEFAULT_VOICE[languages[0]];
+    this.lag = lag;
     this.lost = lost;
   }
   /** Loads a model (files.ts MODELS, Phonon 31M by default): a download the first time, then
@@ -2062,7 +2075,7 @@ var Phonon = class _Phonon {
     ]);
     const engine = new PhononEngine(device, blob, { subgroups, align: files.align });
     await engine.ready();
-    return new _Phonon(engine, tokenizer, catalog, files.languages, device.lost);
+    return new _Phonon(engine, tokenizer, catalog, files.languages, files.align.lag, device.lost);
   }
   /** The catalog's voices in the model's languages. */
   get voices() {
@@ -2099,6 +2112,7 @@ var Phonon = class _Phonon {
       const shiftWord = (w) => ({ ...shift(w), tokens: w.tokens.map(shift) });
       const times = new WordTimes(
         ids.map((id) => this.tokenizer.pieces[id]),
+        this.lag,
         onWord && ((w) => onWord(shiftWord(w)))
       );
       const out = await this.engine.synthesize(ids, v.id, {

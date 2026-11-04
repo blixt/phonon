@@ -140,15 +140,10 @@ export class Codec {
         ...conv("s3r2", s3h, s3r, { cin: 32, cout: 64, k: 1, elu: true, res: s3 }),
         ...conv("s4", s3r, this.audio, { cin: 64, cout: 1, k: 3, elu: true }),
         // Each stage keeps its last rows as the next chunk's left context.
-        ...this.stages.map((st) =>
-          g.op(
-            K.shiftRows(),
-            [
-              st.buf,
-              g.u(K.UNIFORMS.shiftRows, { src: st.rate * T * st.ch, count: st.ctx * st.ch }),
-            ],
-            [Math.ceil((st.ctx * st.ch) / 256), 1, 1],
-          ),
+        g.op(
+          K.shiftRows(this.stages),
+          [...this.stages.map((st) => st.buf), g.u(K.UNIFORMS.shiftRows, { T })],
+          [Math.ceil(this.stages.reduce((n, st) => n + st.ctx * st.ch, 0) / 256), 1, 1],
         ),
       ];
     };
