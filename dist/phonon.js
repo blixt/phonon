@@ -1565,6 +1565,7 @@ var FRAMES_PER_SECOND = 12.5;
 var COPY_DST2 = 8;
 var MAP_READ = 1;
 var AUDIO_AT = 16;
+var ROWS = 16;
 var PhononEngine = class {
   g;
   model;
@@ -1573,6 +1574,7 @@ var PhononEngine = class {
   /** Each voice's prompt keys and values (lm.ts). */
   voices = /* @__PURE__ */ new Map();
   stages;
+  rowsAt;
   pace = Number.NaN;
   constructor(device, model, { subgroups, align }) {
     this.model = model;
@@ -1580,9 +1582,10 @@ var PhononEngine = class {
     this.lm = new LanguageModel(this.g, lmLayers(model), align);
     this.codec = new Codec(this.g, this.lm.lats);
     const most = Math.max(...CHUNKS);
+    this.rowsAt = AUDIO_AT + most * FRAME2 * 4;
     this.stages = Array.from(
       { length: DEPTH + 1 },
-      () => device.createBuffer({ size: AUDIO_AT + most * FRAME2 * 4, usage: COPY_DST2 | MAP_READ })
+      () => device.createBuffer({ size: this.rowsAt + ROWS * TEXT_MAX * 4, usage: COPY_DST2 | MAP_READ })
     );
     this.setPace(0);
   }
@@ -1614,16 +1617,18 @@ var PhononEngine = class {
         toF16(values)
       );
   }
-  /** Text ids to 24 kHz audio in one voice, in chunks as they are made. Null when cancelled. */
+  /** Text ids to 24 kHz audio in one voice, in chunks as they are made, with the alignment
+   *  head's scores of each kept frame over the text as they are made. Null when cancelled. */
   async synthesize(ids, voice, {
     seed = 1,
     words = Infinity,
     cancelled = () => false,
-    onChunk
+    onChunk,
+    onRows
   } = {}) {
     const kv = this.voices.get(voice);
     if (!kv) throw new Error(`Unknown voice ${voice}`);
-    if (!ids.length) return { chunks: [], align: new Float32Array(0) };
+    if (!ids.length) return { chunks: [] };
     if (ids.length > TEXT_MAX) throw new Error(`Text too long: ${ids.length} tokens`);
     const { device } = this.g;
     const { lm, codec } = this;
@@ -1640,6 +1645,7 @@ var PhononEngine = class {
     let issued = 1;
     let decoded = 0;
     let made = 0;
+    let rowsCopied = 0;
     let end = null;
     const chunks = [];
     const free = [...this.stages];
@@ -1662,8 +1668,15 @@ var PhononEngine = class {
       }
       enc.copyBufferToBuffer(this.g.state, 0, stage, 0, 16);
       if (f0 >= 0) enc.copyBufferToBuffer(codec.audio, 0, stage, AUDIO_AT, size * FRAME2 * 4);
+      const r0 = rowsCopied;
+      if (issued > r0) {
+        if (issued - r0 > ROWS) throw new Error(`${issued - r0} alignment rows in one submit`);
+        const bytes = TEXT_MAX * 4;
+        enc.copyBufferToBuffer(lm.align, r0 * bytes, stage, this.rowsAt, (issued - r0) * bytes);
+        rowsCopied = issued;
+      }
       device.queue.submit([enc.finish()]);
-      inflight.push({ stage, f0, size, n: issued, ready: stage.mapAsync(MAP_READ) });
+      inflight.push({ stage, f0, size, n: issued, r0, ready: stage.mapAsync(MAP_READ) });
     };
     const drain = async () => {
       const job = inflight.shift();
@@ -1672,6 +1685,14 @@ var PhononEngine = class {
       const keep2 = new Uint32Array(m, 0, 4)[STATE.end];
       if (end === null && keep2) end = Math.min(keep2, maxFrames);
       if (end === null && job.n >= maxFrames) end = maxFrames;
+      const r1 = Math.min(job.n, end ?? Infinity);
+      if (onRows && r1 > job.r0) {
+        const n = ids.length;
+        const rows = new Float32Array(m, this.rowsAt, (job.n - job.r0) * TEXT_MAX);
+        const out = new Float32Array((r1 - job.r0) * n);
+        for (let r = 0; r < r1 - job.r0; r++) out.set(rows.subarray(r * TEXT_MAX, r * TEXT_MAX + n), r * n);
+        onRows(out);
+      }
       if (job.f0 >= 0 && (end === null || job.f0 < end)) {
         const frames = Math.min(job.size, (end ?? Infinity) - job.f0);
         const chunk = new Float32Array(m, AUDIO_AT, frames * FRAME2).slice();
@@ -1688,22 +1709,7 @@ var PhononEngine = class {
       await drain();
     }
     if (cancelled()) return null;
-    return { chunks, align: await this.alignment(end, ids.length) };
-  }
-  /** The alignment head's scores for `frames` frames over `n` text tokens. */
-  async alignment(frames, n) {
-    const { device } = this.g;
-    const bytes = frames * TEXT_MAX * 4;
-    const read = device.createBuffer({ size: bytes, usage: COPY_DST2 | MAP_READ });
-    const enc = device.createCommandEncoder();
-    enc.copyBufferToBuffer(this.lm.align, 0, read, 0, bytes);
-    device.queue.submit([enc.finish()]);
-    await read.mapAsync(MAP_READ);
-    const rows = new Float32Array(read.getMappedRange());
-    const out = new Float32Array(frames * n);
-    for (let f = 0; f < frames; f++) out.set(rows.subarray(f * TEXT_MAX, f * TEXT_MAX + n), f * n);
-    read.destroy();
-    return out;
+    return { chunks };
   }
 };
 
@@ -1712,78 +1718,148 @@ var SAMPLE_RATE = 24e3;
 var FRAME_SECS = 0.08;
 var LAG = 3;
 var SILENT_DB = -45;
+var HOP = SAMPLE_RATE / 100;
+var STEP_SECS = 5e-3;
 var PUNCTUATION = /* @__PURE__ */ new Set([".", ",", "!", "?", ";", ":", ")", '"', "'"]);
-function alignPositions(scores, frames, n) {
-  const pos = new Float32Array(frames);
-  for (let f = 0; f < frames; f++) {
-    const row = scores.subarray(f * n, f * n + n);
-    let k = 0;
-    for (let i = 1; i < n; i++) if (row[i] > row[k]) k = i;
-    let num = 0;
-    let den = 0;
-    for (let i = Math.max(0, k - 2); i <= Math.min(n - 1, k + 2); i++) {
-      const p = Math.exp(row[i] - row[k]);
-      num += p * i;
-      den += p;
-    }
-    pos[f] = num / den;
-  }
-  if (frames > 1) pos[0] = Math.min(pos[0], pos[1]);
-  for (let f = 1; f < frames; f++) pos[f] = Math.max(pos[f], pos[f - 1]);
-  return pos;
-}
-function envelope(pcm) {
-  const hop = SAMPLE_RATE / 100;
-  const out = new Float32Array(Math.floor(pcm.length / hop));
-  for (let i = 0; i < out.length; i++) {
-    let s = 0;
-    for (let j = i * hop; j < (i + 1) * hop; j++) s += pcm[j] * pcm[j];
-    out[i] = 20 * Math.log10(Math.sqrt(s / hop) + 1e-9);
-  }
-  return out;
-}
-function spans(scores, pieces, pcm) {
-  const n = pieces.length;
-  const frames = n ? scores.length / n : 0;
-  const end = pcm.length / SAMPLE_RATE;
-  if (!n || !frames) return { tokens: [], words: [] };
-  const pos = alignPositions(scores, frames, n);
-  const posAt = (t) => {
-    const g = (t - FRAME_SECS / 2) / FRAME_SECS - LAG;
-    if (g <= 0) return pos[0];
-    if (g >= frames - 1) return pos[frames - 1];
-    const i = Math.floor(g);
-    return pos[i] * (1 - (g - i)) + pos[i + 1] * (g - i);
-  };
-  const starts = Array.from({ length: n }, () => null);
-  for (let t = 0; t <= end; t += 5e-3) {
-    const k = Math.round(posAt(t));
-    for (let j = 0; j <= k && j < n; j++) starts[j] ??= t;
-  }
-  const loud = envelope(pcm);
-  const at = [];
-  for (let j = 0; j < n; j++) {
-    let i = Math.floor((starts[j] ?? end) * 100);
-    while (i < loud.length && loud[i] < SILENT_DB) i++;
-    at.push(Math.max(starts[j] ?? end, i / 100, j ? at[j - 1] : 0));
-  }
-  const tokens = pieces.map((p, j) => ({
-    text: p.replaceAll("\u2581", ""),
-    start: at[j],
-    end: j + 1 < n ? at[j + 1] : end
-  }));
+function wordRanges(pieces) {
   const words = [];
   pieces.forEach((p, j) => {
     const text = p.replaceAll("\u2581", "");
     const joins = !p.startsWith("\u2581") || !!text && [...text].every((c) => PUNCTUATION.has(c));
     if (words.length && joins) {
-      const w = words.at(-1);
-      w.text += text;
-      w.end = tokens[j].end;
-    } else words.push({ text, start: tokens[j].start, end: tokens[j].end });
+      words.at(-1).text += text;
+      words.at(-1).to = j + 1;
+    } else words.push({ text, from: j, to: j + 1 });
   });
-  return { tokens, words: words.filter((w) => w.text) };
+  return words.filter((w) => w.text);
 }
+var WordTimes = class {
+  pieces;
+  ranges;
+  onWord;
+  /** Each frame's position before the never-back rule, and after it (pos[0] waits for frame 1). */
+  raw = [];
+  pos = [];
+  /** Loudness per complete 10 ms window, and the samples not yet in a window. */
+  loud = [];
+  samples = 0;
+  partial = new Float32Array(HOP);
+  partialAt = 0;
+  /** The next time a token can start at, and each token's start before and after the silence step. */
+  t = 0;
+  starts;
+  at = [];
+  emitted = 0;
+  ended = false;
+  constructor(pieces, onWord) {
+    this.pieces = pieces;
+    this.ranges = wordRanges(pieces);
+    this.onWord = onWord;
+    this.starts = Array.from({ length: pieces.length }, () => null);
+  }
+  /** Alignment rows of the next frames, `pieces.length` scores each. */
+  addRows(rows) {
+    const n = this.pieces.length;
+    for (let r = 0; r + n <= rows.length; r += n) {
+      const row = rows.subarray(r, r + n);
+      let k = 0;
+      for (let i = 1; i < n; i++) if (row[i] > row[k]) k = i;
+      let num = 0;
+      let den = 0;
+      for (let i = Math.max(0, k - 2); i <= Math.min(n - 1, k + 2); i++) {
+        const p = Math.exp(row[i] - row[k]);
+        num += p * i;
+        den += p;
+      }
+      this.raw.push(num / den);
+      this.settle();
+    }
+    this.advance();
+  }
+  /** The next samples of the text's audio. */
+  addAudio(pcm) {
+    for (let i = 0; i < pcm.length; i++) {
+      this.partial[this.partialAt++] = pcm[i];
+      if (this.partialAt === HOP) {
+        let s = 0;
+        for (let j = 0; j < HOP; j++) s += this.partial[j] * this.partial[j];
+        this.loud.push(20 * Math.log10(Math.sqrt(s / HOP) + 1e-9));
+        this.partialAt = 0;
+      }
+    }
+    this.samples += pcm.length;
+    this.advance();
+  }
+  /** The text has ended: every remaining word, and all the times. */
+  finish() {
+    this.ended = true;
+    if (!this.raw.length) return { tokens: [], words: [] };
+    this.settle();
+    this.advance();
+    const tokens = this.pieces.map((_, j) => this.token(j));
+    return { tokens, words: this.ranges.map((w) => this.word(w)) };
+  }
+  get end() {
+    return this.samples / SAMPLE_RATE;
+  }
+  /** Frame 0's row comes from the end-of-text query, which in some models reads the last token:
+   *  it counts no further than frame 1's. Positions never move back. */
+  settle() {
+    const { raw, pos } = this;
+    if (!pos.length && (raw.length >= 2 || this.ended && raw.length))
+      pos.push(raw.length > 1 ? Math.min(raw[0], raw[1]) : raw[0]);
+    while (pos.length && pos.length < raw.length) pos.push(Math.max(raw[pos.length], pos[pos.length - 1]));
+  }
+  /** The head's position heard at time t, or null while frames still to come could change it. */
+  posAt(t) {
+    const { pos } = this;
+    const g = (t - FRAME_SECS / 2) / FRAME_SECS - LAG;
+    if (!pos.length) return null;
+    if (g <= 0) return pos[0];
+    if (this.ended && g >= pos.length - 1) return pos[pos.length - 1];
+    const i = Math.floor(g);
+    if (i + 1 >= pos.length) return null;
+    return pos[i] * (1 - (g - i)) + pos[i + 1] * (g - i);
+  }
+  /** Takes every time step and token start that can no longer change, then reports words. */
+  advance() {
+    const n = this.pieces.length;
+    if (!n || !this.raw.length) return;
+    for (; this.t <= this.end; this.t += STEP_SECS) {
+      const p = this.posAt(this.t);
+      if (p === null) break;
+      const k = Math.round(p);
+      for (let j = 0; j <= k && j < n; j++) this.starts[j] ??= this.t;
+    }
+    while (this.at.length < n) {
+      const j = this.at.length;
+      const start = this.starts[j];
+      if (start === null && !this.ended) break;
+      const from = start ?? this.end;
+      let i = Math.floor(from * 100);
+      while (i < this.loud.length && this.loud[i] < SILENT_DB) i++;
+      if (i >= this.loud.length && !this.ended) break;
+      this.at.push(Math.max(from, i / 100, j ? this.at[j - 1] : 0));
+    }
+    while (this.emitted < this.ranges.length) {
+      const w = this.ranges[this.emitted];
+      if (!(this.ended || w.to < this.at.length)) break;
+      this.onWord?.(this.word(w));
+      this.emitted++;
+    }
+  }
+  token(j) {
+    return {
+      text: this.pieces[j].replaceAll("\u2581", ""),
+      start: this.at[j],
+      end: j + 1 < this.pieces.length ? this.at[j + 1] : this.end
+    };
+  }
+  word(w) {
+    const tokens = Array.from({ length: w.to - w.from }, (_, k) => this.token(w.from + k));
+    return { text: w.text, start: tokens[0].start, end: tokens.at(-1).end, tokens };
+  }
+};
 
 // src/tokenizer.ts
 var BYTE = /^<0x([0-9A-F]{2})>$/;
@@ -1988,9 +2064,23 @@ var Phonon = class _Phonon {
   get voices() {
     return this.catalog;
   }
+  /** The words `speak` gives for a text, in order, each with its tokens' text, as the tokenizer
+   *  writes them: a page can lay them out before the times arrive. */
+  words(text) {
+    return this.parts(text).flatMap((part) => {
+      const pieces = this.tokenizer.encode(part).map((id) => this.tokenizer.pieces[id].replaceAll("\u2581", ""));
+      return wordRanges(this.tokenizer.encode(part).map((id) => this.tokenizer.pieces[id])).map((w) => ({
+        text: w.text,
+        tokens: pieces.slice(w.from, w.to)
+      }));
+    });
+  }
+  parts(text) {
+    return parts(text, (s) => this.tokenizer.encode(s).length);
+  }
   /** Text to speech, in parts that fit the model, joined. */
   async speak(text, options = {}) {
-    const { voice = "Delia", speed = 1, seed = 1, onAudio, signal } = options;
+    const { voice = "Delia", speed = 1, seed = 1, onAudio, onWord, signal } = options;
     const v = this.catalog.find((c) => c.name === voice || c.id === voice);
     if (!v) throw new Error(`No voice ${voice}`);
     if (!this.engine.hasVoice(v.id)) this.engine.addVoice(v.id, readVoice(await cached(voiceUrl(v.id))));
@@ -1999,20 +2089,29 @@ var Phonon = class _Phonon {
     const words = [];
     const tokens = [];
     let at = 0;
-    for (const [i, part] of parts(text, (s) => this.tokenizer.encode(s).length).entries()) {
+    for (const [i, part] of this.parts(text).entries()) {
       signal?.throwIfAborted();
       const ids = this.tokenizer.encode(part);
+      const shift = (s) => ({ ...s, start: s.start + at, end: s.end + at });
+      const shiftWord = (w) => ({ ...shift(w), tokens: w.tokens.map(shift) });
+      const times = new WordTimes(
+        ids.map((id) => this.tokenizer.pieces[id]),
+        onWord && ((w) => onWord(shiftWord(w)))
+      );
       const out = await this.engine.synthesize(ids, v.id, {
         seed: seed + i,
         words: part.split(/\s+/).filter(Boolean).length,
-        onChunk: onAudio,
+        onRows: (rows) => times.addRows(rows),
+        onChunk: (chunk) => {
+          times.addAudio(chunk);
+          onAudio?.(chunk);
+        },
         cancelled: () => !!signal?.aborted
       });
       signal?.throwIfAborted();
       const pcm = join(out.chunks);
-      const timed = spans(out.align, ids.map((id) => this.tokenizer.pieces[id]), pcm);
-      const shift = (s) => ({ ...s, start: s.start + at, end: s.end + at });
-      words.push(...timed.words.map(shift));
+      const timed = times.finish();
+      words.push(...timed.words.map(shiftWord));
       tokens.push(...timed.tokens.map(shift));
       audio.push(pcm);
       at += pcm.length / SAMPLE_RATE;

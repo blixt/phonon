@@ -74,6 +74,7 @@ button, select, textarea, input { font: inherit; color: inherit; }
 /* The spoken words, over the text they came from: clicks between words reach the text. */
 .words { position: absolute; inset: 0; visibility: hidden; pointer-events: none; color: var(--ink); }
 .words.on { visibility: visible; }
+.words .why { color: var(--ink2); }
 .demo textarea:focus, .demo select:focus-visible, .demo button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; }
 .controls select { border: 0; border-radius: 8px; background: var(--panel); padding: 8px 10px; width: 8em; }
@@ -91,17 +92,22 @@ button, select, textarea, input { font: inherit; color: inherit; }
   .speak { flex: 1 0 100%; margin-left: 0; padding: 11px; }
 }
 .speak:disabled { opacity: 0.5; cursor: default; }
-.words span { border-radius: 4px; cursor: pointer; pointer-events: auto; transition: background 0.08s; }
-.words span:hover { background: var(--panel); }
-.words span.now { background: var(--accent); color: #fff; }
-@media (prefers-color-scheme: dark) { .words span.now { color: #2a1210; } }
+/* A word is its tokens: the highlight grows token by token while the word is heard. */
+.words .w { border-radius: 4px; cursor: pointer; pointer-events: auto; transition: background 0.08s; }
+.words .w:hover { background: var(--panel); }
+.words .w .lit { background: var(--accent); color: #fff; }
+.words .w .lit:first-child { border-radius: 4px 0 0 4px; }
+.words .w .lit:not(:has(+ .lit)) { border-top-right-radius: 4px; border-bottom-right-radius: 4px; }
+@media (prefers-color-scheme: dark) { .words .w .lit { color: #2a1210; } }
 .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: 6px; }
 .stat { min-width: 0; }
 .stat b { display: block; font-size: 22px; font-weight: 650; line-height: 1.2; letter-spacing: -0.01em; white-space: nowrap; }
 .stat span { display: block; font-size: 12.5px; line-height: 1.35; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .stat.live b { color: var(--accent); }
 @media (max-width: 520px) { .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 14px; } }
-.device { font-size: 12.5px; color: var(--muted); margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.device { display: flex; align-items: baseline; gap: 12px; font-size: 12.5px; color: var(--muted); margin: 0; }
+#device-text { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.copy { flex: none; min-width: 7em; border: 0; background: none; padding: 0; font-size: 12.5px; color: var(--accent); text-align: right; cursor: pointer; }
 .demo .model { align-self: flex-start; border: 0; border-radius: 8px; background: var(--panel); padding: 8px 10px; max-width: 100%; }
 
 /* Charts */

@@ -24,8 +24,10 @@ const SHORT_TEXT_WORDS = 4;
 const FRAMES_PER_SECOND = 12.5;
 const COPY_DST = 0x08;
 const MAP_READ = 0x01;
-/** Each submit's readback: the state, then its chunk's audio. */
+/** Each submit's readback: the state, its chunk's audio, then the alignment rows of the frames
+ *  it made (at most 8 steps and frame 0's row). */
 const AUDIO_AT = 16;
+const ROWS = 16;
 
 export class PhononEngine {
   private readonly g: Graph;
@@ -35,6 +37,7 @@ export class PhononEngine {
   /** Each voice's prompt keys and values (lm.ts). */
   private readonly voices = new Map<string, GPUBuffer>();
   private readonly stages: GPUBuffer[];
+  private readonly rowsAt: number;
   private pace = Number.NaN;
 
   constructor(
@@ -47,8 +50,9 @@ export class PhononEngine {
     this.lm = new LanguageModel(this.g, lmLayers(model), align);
     this.codec = new Codec(this.g, this.lm.lats);
     const most = Math.max(...CHUNKS);
+    this.rowsAt = AUDIO_AT + most * FRAME * 4;
     this.stages = Array.from({ length: DEPTH + 1 }, () =>
-      device.createBuffer({ size: AUDIO_AT + most * FRAME * 4, usage: COPY_DST | MAP_READ }),
+      device.createBuffer({ size: this.rowsAt + ROWS * TEXT_MAX * 4, usage: COPY_DST | MAP_READ }),
     );
     this.setPace(0);
   }
@@ -84,7 +88,8 @@ export class PhononEngine {
       );
   }
 
-  /** Text ids to 24 kHz audio in one voice, in chunks as they are made. Null when cancelled. */
+  /** Text ids to 24 kHz audio in one voice, in chunks as they are made, with the alignment
+   *  head's scores of each kept frame over the text as they are made. Null when cancelled. */
   async synthesize(
     ids: number[],
     voice: string,
@@ -93,6 +98,7 @@ export class PhononEngine {
       words = Infinity,
       cancelled = () => false,
       onChunk,
+      onRows,
     }: {
       seed?: number;
       /** The text's words: a short text keeps more frames after the end of speech. */
@@ -100,11 +106,13 @@ export class PhononEngine {
       cancelled?: () => boolean;
       /** Each chunk of audio as it is made. */
       onChunk?: (samples: Float32Array) => void;
+      /** The alignment rows of the next kept frames, one score per text token each. */
+      onRows?: (rows: Float32Array) => void;
     } = {},
   ): Promise<Synthesis | null> {
     const kv = this.voices.get(voice);
     if (!kv) throw new Error(`Unknown voice ${voice}`);
-    if (!ids.length) return { chunks: [], align: new Float32Array(0) };
+    if (!ids.length) return { chunks: [] };
     if (ids.length > TEXT_MAX) throw new Error(`Text too long: ${ids.length} tokens`);
     const { device } = this.g;
     const { lm, codec } = this;
@@ -121,6 +129,7 @@ export class PhononEngine {
     let issued = 1;
     let decoded = 0;
     let made = 0;
+    let rowsCopied = 0;
     let end: number | null = null;
     const chunks: Float32Array[] = [];
     const free = [...this.stages];
@@ -129,6 +138,8 @@ export class PhononEngine {
       f0: number;
       size: number;
       n: number;
+      /** The frames whose alignment rows it carries. */
+      r0: number;
       ready: Promise<void>;
     }[] = [];
     // One submit: the steps the next chunk needs, then that chunk.
@@ -150,8 +161,15 @@ export class PhononEngine {
       }
       enc.copyBufferToBuffer(this.g.state, 0, stage, 0, 16);
       if (f0 >= 0) enc.copyBufferToBuffer(codec.audio, 0, stage, AUDIO_AT, size * FRAME * 4);
+      const r0 = rowsCopied;
+      if (issued > r0) {
+        if (issued - r0 > ROWS) throw new Error(`${issued - r0} alignment rows in one submit`);
+        const bytes = TEXT_MAX * 4;
+        enc.copyBufferToBuffer(lm.align, r0 * bytes, stage, this.rowsAt, (issued - r0) * bytes);
+        rowsCopied = issued;
+      }
       device.queue.submit([enc.finish()]);
-      inflight.push({ stage, f0, size, n: issued, ready: stage.mapAsync(MAP_READ) });
+      inflight.push({ stage, f0, size, n: issued, r0, ready: stage.mapAsync(MAP_READ) });
     };
     const drain = async () => {
       const job = inflight.shift()!;
@@ -161,6 +179,15 @@ export class PhononEngine {
       const keep = new Uint32Array(m, 0, 4)[STATE.end];
       if (end === null && keep) end = Math.min(keep, maxFrames);
       if (end === null && job.n >= maxFrames) end = maxFrames;
+      // Rows come before audio: a frame's words can need the head's later frames, never its audio.
+      const r1 = Math.min(job.n, end ?? Infinity);
+      if (onRows && r1 > job.r0) {
+        const n = ids.length;
+        const rows = new Float32Array(m, this.rowsAt, (job.n - job.r0) * TEXT_MAX);
+        const out = new Float32Array((r1 - job.r0) * n);
+        for (let r = 0; r < r1 - job.r0; r++) out.set(rows.subarray(r * TEXT_MAX, r * TEXT_MAX + n), r * n);
+        onRows(out);
+      }
       if (job.f0 >= 0 && (end === null || job.f0 < end)) {
         const frames = Math.min(job.size, (end ?? Infinity) - job.f0);
         const chunk = new Float32Array(m, AUDIO_AT, frames * FRAME).slice();
@@ -177,29 +204,11 @@ export class PhononEngine {
       await drain();
     }
     if (cancelled()) return null;
-    return { chunks, align: await this.alignment(end!, ids.length) };
-  }
-
-  /** The alignment head's scores for `frames` frames over `n` text tokens. */
-  private async alignment(frames: number, n: number): Promise<Float32Array> {
-    const { device } = this.g;
-    const bytes = frames * TEXT_MAX * 4;
-    const read = device.createBuffer({ size: bytes, usage: COPY_DST | MAP_READ });
-    const enc = device.createCommandEncoder();
-    enc.copyBufferToBuffer(this.lm.align, 0, read, 0, bytes);
-    device.queue.submit([enc.finish()]);
-    await read.mapAsync(MAP_READ);
-    const rows = new Float32Array(read.getMappedRange());
-    const out = new Float32Array(frames * n);
-    for (let f = 0; f < frames; f++) out.set(rows.subarray(f * TEXT_MAX, f * TEXT_MAX + n), f * n);
-    read.destroy();
-    return out;
+    return { chunks };
   }
 }
 
-/** A text's audio, in the chunks it was made in, and the alignment head's scores over its
- *  tokens: one row per 80 ms frame. */
+/** A text's audio, in the chunks it was made in. */
 export interface Synthesis {
   chunks: Float32Array[];
-  align: Float32Array;
 }

@@ -9,10 +9,10 @@ Fast text-to-speech in the browser, with a start and end time for every word.
 blixt/phonon is a WebGPU runtime for [Phonon 31M](https://huggingface.co/gradium/phonon-31m-en), an Apache-2.0 text-to-speech model by [Gradium](https://gradium.ai). Gradium did not make blixt/phonon. It also runs Gradium's larger 40M models in English, French, German, Spanish and Portuguese, which are not for commercial use ([Other models](#other-models)).
 
 - It makes 24 kHz English speech in any of Gradium's English voices, and streams the audio as it goes.
-- It returns the start and end time of every word and token.
+- It gives the start and end time of every word and of each token in it, while it speaks: each word's times arrive before the word is heard.
 - The speaking speed goes from about 0.77× to 1.3×.
 - It downloads Gradium's weights with the large matrices converted to 8-bit integers (43.7 MB, [on Hugging Face](https://huggingface.co/blixt/phonon-31m-en-webgpu)) and keeps them in the browser's cache.
-- It runs in Chrome on macOS and Windows and in Safari on iOS. Firefox and Android are not tested.
+- It runs in Chrome on macOS and Windows and in Safari on iOS, and a user ran it in Firefox on a Pixel 10 Pro. Other browsers are not tested.
 
 Against Gradium's own browser package, [phonon-tts](https://www.npmjs.com/package/phonon-tts), on WebGPU, with Phonon 31M:
 
@@ -80,11 +80,14 @@ const speech = await tts.speak("The birch canoe slid on the smooth planks.", {
   voice: "Delia", // any voice of Gradium's catalog in the model's languages: tts.voices
   speed: 1,
   onAudio: (samples) => {}, // each chunk, as soon as it exists
+  onWord: (word) => {}, // each word with its times, in order, before it is heard
 });
 // speech.audio: Float32Array at speech.sampleRate (24000)
-// speech.words: [{ text: "The", start: 0.13, end: 0.40 }, …], in seconds
-// speech.tokens: the same for each token
+// speech.words: [{ text: "The", start: 0.13, end: 0.40, tokens: [{ text: "The", start: 0.13, end: 0.40 }] }, …], in seconds
+// speech.tokens: every token's time
 ```
+
+`onWord` gives the same words as `speech.words`, as soon as nothing still to come can change them. `tts.words(text)` lists the words and their tokens before speaking, so a page can lay them out first. The demo does that, and lights each word token by token while it is heard, so a long compound like "Donaudampfschifffahrtsgesellschaft" lights in pieces.
 
 `Phonon.load` throws when the browser has no WebGPU. The first load downloads 44.3 MB from Hugging Face (the weights, the tokenizer and a voice), and later loads read them from the browser's cache.
 
@@ -162,12 +165,13 @@ An empty dependent dispatch costs about 1.6 µs in Chrome and WebKit on the M3 M
 ### Word timings
 
 1. Find a head that follows the text. I ran the reference on four texts and recorded each head's attention over the text tokens at every 80 ms frame. Each head got a score: the correlation between the frame number and the token it attends most, times the share of frames that do not move back, times its mean peak attention. Layer 3, head 0 scored 0.78. The next best (layer 3, head 5) scored 0.45, and all others 0.15 or less. Layer 3, head 0 has a correlation of 0.99 or more, never moves back and puts about 80% of its attention on one token.
-2. Record it on the GPU. In every step, the layer 3 attention kernel writes head 0's scores over the text tokens into an alignment buffer, one row per frame. A small extra kernel in the prefill writes frame 0's row from the BOS row's query. After the text ends, the engine reads back the rows of the frames it kept: one small readback per text.
+2. Record it on the GPU. In every step, the layer 3 attention kernel writes head 0's scores over the text tokens into an alignment buffer, one row per frame. A small extra kernel in the prefill writes frame 0's row from the BOS row's query. The rows of each submit's frames come back with its audio, in the readback the engine makes anyway, about 1 KB per frame.
 3. Turn the scores into a position. For each frame, take the token with the highest score and average the token index over the 2 tokens on each side of it, with softmax weights. The position never moves back. Frame 0's position counts no further than frame 1's: frame 0's row comes from the end-of-text query, and in some 40M models that query reads the last token, which would pin every word to the start.
 4. Correct the lead. The head reaches a word about 230 ms (about 3 frames) before the audio does, and the times shift back by 3 frames. After a pause, the head reaches the next word 400 to 570 ms early, because it moves on when the previous word ends. A word start that falls where the audio is quieter than −45 dB (in 10 ms steps) moves to where the sound begins.
 5. Group the tokens into words. A token that starts with ▁ starts a word, unless it is only punctuation.
+6. Report each word once nothing still to come can change it. Every step looks only at earlier frames and audio, except three short looks ahead: interpolation needs the next frame, the silence step needs the audio up to where sound begins, and a word's end is the next word's start. [timing.ts](src/timing.ts) takes frames and audio as they arrive and reports a word as soon as the token after it has its start. A whole text goes through the same code. On 47 texts in all seven models (814 words), the words reported while speaking, the words of the finished text and the times from the previous all-at-once code were identical. A word arrives when about as much audio exists as reaches its start (median), 0.42 s past it at the 90th percentile and 1.2 s after a long pause. Playback starts with the first chunk, so a device that makes audio at least about twice as fast as real time gets every word before it is heard.
 
-I chose the 3-frame shift and the −45 dB threshold on 110 words of four other texts. On those words, a 4-frame shift without the silence step was a mean 110 ms from a wav2vec2 forced aligner, and the chosen settings were about 55 ms. The figure above is a held-out check on the 11 benchmark texts in 4 voices (712 words). Word starts are a mean 67 ms and a median 65 ms from the aligner, 76% are within 100 ms, and the 90th percentile is 125 ms. The median signed difference is +40 ms, with the engine later. Only word starts were scored, and the aligner has its own error of a few tens of milliseconds. The "never move back" rule could also hide a repeated or skipped word.
+I chose the 3-frame shift and the −45 dB threshold on 110 words of four other texts. On those words, a 4-frame shift without the silence step was a mean 110 ms from a wav2vec2 forced aligner, and the chosen settings were about 55 ms. The figure above is a held-out check on the 11 benchmark texts in 4 voices (712 words). Word starts are a mean 67 ms and a median 65 ms from the aligner, 76% are within 100 ms, and the 90th percentile is 125 ms. The median signed difference is +40 ms, with the engine later. Only word starts were scored here, and the aligner has its own error of a few tens of milliseconds. The "never move back" rule could also hide a repeated or skipped word.
 
 Each 40M model has its own head, and [files.ts](src/files.ts) names it. To find it, the engine spoke 4 other texts in the model's language once with each of the 72 heads (9 layers of 8), with the same shift and threshold. A forced aligner then scored the word starts: [wav2vec2](https://huggingface.co/facebook/wav2vec2-base-960h) in English, and [MMS](https://pytorch.org/audio/stable/generated/torchaudio.pipelines.MMS_FA.html) on romanized text in all five languages. Both aligners scored the multilingual model's English within 2 ms of each other. In each model one head was best by far:
 
@@ -181,6 +185,18 @@ Each 40M model has its own head, and [files.ts](src/files.ts) names it. To find 
 | `phonon-40m-multilingual` | 4, 1 | 4, 4 | 35 to 57 ms by language | 84 to 97% |
 
 The held-out check is 6 other texts in 2 voices for each language (106 to 124 words), scored with MMS. The multilingual model's head was chosen on English and held up in all five languages. Phonon 31M's word times are unchanged by the frame 0 rule.
+
+Token starts inside words come from the same head and are about as close as word starts. MMS aligns each character, which gives the true start of a token in the middle of a word:
+
+| Model, texts | Word starts: mean, median | Tokens inside words: mean, median | Tokens inside words: median signed |
+|---|--:|--:|--:|
+| `phonon-31m-en`, 11 benchmark texts, 2 voices | 69 ms, 69 ms | 66 ms, 57 ms | +47 ms |
+| `phonon-40m-fr`, 6 texts, 2 voices | 39 ms, 31 ms | 48 ms, 34 ms | +4 ms |
+| `phonon-40m-de` | 77 ms, 77 ms | 96 ms, 101 ms | +100 ms |
+| `phonon-40m-es` | 60 ms, 56 ms | 87 ms, 91 ms | +90 ms |
+| `phonon-40m-pt` | 58 ms, 55 ms | 87 ms, 57 ms | +52 ms |
+
+Most of the error is the engine being late by a similar amount for every token of a model, not scatter.
 
 ### Sampling
 
@@ -254,7 +270,7 @@ HF_LOCAL="gradium/phonon-40m-multilingual=path/to/download" node bench/drive.mjs
 
 ## Limits
 
-- The browser must have WebGPU.
+- The browser must have WebGPU. On Android, Chrome turns WebGPU off under Advanced Protection and on some GPUs. The demo then says why it cannot speak, and "Copy details" copies the browser, the GPU and the last error for a bug report.
 - Only Phonon 31M, in English, is Apache-2.0. The 40M models are under CC BY-NC 4.0: no commercial use.
 - phonon-tts can write out numbers, amounts, dates and symbols as words before it speaks, in each language's own way. blixt/phonon cannot, and numbers read best written as words.
 - The word times follow the model's attention. They are not a forced alignment.

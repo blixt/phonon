@@ -9,6 +9,7 @@ export declare class PhononEngine {
     /** Each voice's prompt keys and values (lm.ts). */
     private readonly voices;
     private readonly stages;
+    private readonly rowsAt;
     private pace;
     constructor(device: GPUDevice, model: PhononModel, { subgroups, align }: {
         subgroups: boolean;
@@ -24,21 +25,20 @@ export declare class PhononEngine {
     hasVoice(name: string): boolean;
     /** The LM's pace (pace.ts): its condition and BOS row are written into the blob. */
     setPace(delta: number): void;
-    /** Text ids to 24 kHz audio in one voice, in chunks as they are made. Null when cancelled. */
-    synthesize(ids: number[], voice: string, { seed, words, cancelled, onChunk, }?: {
+    /** Text ids to 24 kHz audio in one voice, in chunks as they are made, with the alignment
+     *  head's scores of each kept frame over the text as they are made. Null when cancelled. */
+    synthesize(ids: number[], voice: string, { seed, words, cancelled, onChunk, onRows, }?: {
         seed?: number;
         /** The text's words: a short text keeps more frames after the end of speech. */
         words?: number;
         cancelled?: () => boolean;
         /** Each chunk of audio as it is made. */
         onChunk?: (samples: Float32Array) => void;
+        /** The alignment rows of the next kept frames, one score per text token each. */
+        onRows?: (rows: Float32Array) => void;
     }): Promise<Synthesis | null>;
-    /** The alignment head's scores for `frames` frames over `n` text tokens. */
-    private alignment;
 }
-/** A text's audio, in the chunks it was made in, and the alignment head's scores over its
- *  tokens: one row per 80 ms frame. */
+/** A text's audio, in the chunks it was made in. */
 export interface Synthesis {
     chunks: Float32Array[];
-    align: Float32Array;
 }

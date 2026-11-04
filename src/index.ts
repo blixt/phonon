@@ -18,7 +18,7 @@ import {
 } from "./files";
 import { PhononEngine, TEXT_MAX } from "./engine";
 import { paceForSpeed } from "./pace";
-import { SAMPLE_RATE, spans, type Span } from "./timing";
+import { SAMPLE_RATE, WordTimes, wordRanges, type Span, type Word } from "./timing";
 import { Tokenizer } from "./tokenizer";
 
 async function openCache(): Promise<Cache | null> {
@@ -113,11 +113,11 @@ export interface Voice {
   description: string;
 }
 
-/** Speech for a text: its 24 kHz samples and when each word and token is heard. */
+/** Speech for a text: its 24 kHz samples and when each word, and each token in it, is heard. */
 export interface Speech {
   audio: Float32Array;
   sampleRate: number;
-  words: Span[];
+  words: Word[];
   tokens: Span[];
 }
 
@@ -130,6 +130,9 @@ export interface SpeakOptions {
   seed?: number;
   /** Each chunk of audio as soon as it is made: the first comes within milliseconds. */
   onAudio?: (samples: Float32Array) => void;
+  /** Each word with its times, in order, as soon as they are known: before it is heard, while
+   *  the audio is made faster than real time. They are the same as the result's `words`. */
+  onWord?: (word: Word) => void;
   signal?: AbortSignal;
 }
 
@@ -190,32 +193,57 @@ export class Phonon {
     return this.catalog;
   }
 
+  /** The words `speak` gives for a text, in order, each with its tokens' text, as the tokenizer
+   *  writes them: a page can lay them out before the times arrive. */
+  words(text: string): { text: string; tokens: string[] }[] {
+    return this.parts(text).flatMap((part) => {
+      const pieces = this.tokenizer.encode(part).map((id) => this.tokenizer.pieces[id].replaceAll("▁", ""));
+      return wordRanges(this.tokenizer.encode(part).map((id) => this.tokenizer.pieces[id])).map((w) => ({
+        text: w.text,
+        tokens: pieces.slice(w.from, w.to),
+      }));
+    });
+  }
+
+  private parts(text: string) {
+    return parts(text, (s) => this.tokenizer.encode(s).length);
+  }
+
   /** Text to speech, in parts that fit the model, joined. */
   async speak(text: string, options: SpeakOptions = {}): Promise<Speech> {
-    const { voice = "Delia", speed = 1, seed = 1, onAudio, signal } = options;
+    const { voice = "Delia", speed = 1, seed = 1, onAudio, onWord, signal } = options;
     const v = this.catalog.find((c) => c.name === voice || c.id === voice);
     if (!v) throw new Error(`No voice ${voice}`);
     if (!this.engine.hasVoice(v.id)) this.engine.addVoice(v.id, readVoice(await cached(voiceUrl(v.id))));
     this.engine.setPace(paceForSpeed(speed));
     const audio: Float32Array[] = [];
-    const words: Span[] = [];
+    const words: Word[] = [];
     const tokens: Span[] = [];
     let at = 0;
     // Each part has its own seed: the noise depends on the seed and the frame, which starts at 0.
-    for (const [i, part] of parts(text, (s) => this.tokenizer.encode(s).length).entries()) {
+    for (const [i, part] of this.parts(text).entries()) {
       signal?.throwIfAborted();
       const ids = this.tokenizer.encode(part);
+      const shift = <S extends Span>(s: S): S => ({ ...s, start: s.start + at, end: s.end + at });
+      const shiftWord = (w: Word): Word => ({ ...shift(w), tokens: w.tokens.map(shift) });
+      const times = new WordTimes(
+        ids.map((id) => this.tokenizer.pieces[id]),
+        onWord && ((w) => onWord(shiftWord(w))),
+      );
       const out = await this.engine.synthesize(ids, v.id, {
         seed: seed + i,
         words: part.split(/\s+/).filter(Boolean).length,
-        onChunk: onAudio,
+        onRows: (rows) => times.addRows(rows),
+        onChunk: (chunk) => {
+          times.addAudio(chunk);
+          onAudio?.(chunk);
+        },
         cancelled: () => !!signal?.aborted,
       });
       signal?.throwIfAborted();
       const pcm = join(out!.chunks);
-      const timed = spans(out!.align, ids.map((id) => this.tokenizer.pieces[id]), pcm);
-      const shift = (s: Span) => ({ ...s, start: s.start + at, end: s.end + at });
-      words.push(...timed.words.map(shift));
+      const timed = times.finish();
+      words.push(...timed.words.map(shiftWord));
       tokens.push(...timed.tokens.map(shift));
       audio.push(pcm);
       at += pcm.length / SAMPLE_RATE;
@@ -242,4 +270,4 @@ function subgroups32(adapter: GPUAdapter): boolean {
 
 export { TEXT_MAX } from "./engine";
 export { MODELS, type Language, type ModelId } from "./files";
-export type { Span } from "./timing";
+export type { Span, Word } from "./timing";

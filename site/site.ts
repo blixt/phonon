@@ -1,6 +1,6 @@
 // The web page's script: it draws the charts into the boxes the build wrote (frames.ts), and
 // runs the demo with its live numbers. Nothing here changes a box's size.
-import { Phonon, type Speech, type Voice } from "../src/index";
+import { Phonon, type Speech, type Voice, type Word } from "../src/index";
 import { MODEL_CACHE, MODELS, type Language, type ModelId } from "../src/files";
 import { DEVICES, METRICS, PHRASES, QUALITY, RESULTS, RUNTIMES, TEXTS, TIMING, fmt, ms, short, type Metric, type Stat, downloadMb } from "./data";
 
@@ -335,6 +335,30 @@ function listenPlayers(box: HTMLElement) {
 
 // ---- The demo. ----
 
+/** What a bug report needs: the page, the browser, the GPU and its limits, the model and the last error. */
+function details(adapter: GPUAdapter | null, model: string, error: string | null): string {
+  const info = adapter?.info as (GPUAdapterInfo & { subgroupMinSize?: number; subgroupMaxSize?: number }) | undefined;
+  const limits = adapter
+    ? (["maxBufferSize", "maxStorageBufferBindingSize", "maxStorageBuffersPerShaderStage", "maxComputeWorkgroupStorageSize", "maxComputeInvocationsPerWorkgroup"] as const)
+        .map((k) => `${k} ${adapter.limits[k]}`)
+        .join(", ")
+    : "–";
+  const stat = (id: string) => document.getElementById(id)?.innerText.replace(/\s+/g, " ") ?? "";
+  return [
+    "blixt/phonon details",
+    `page: ${location.href}`,
+    `browser: ${navigator.userAgent}`,
+    `WebGPU: ${"gpu" in navigator ? "yes" : "no"}`,
+    `adapter: ${info ? [info.vendor, info.architecture, info.device, info.description].filter(Boolean).join(" / ") || "unnamed" : "none"}`,
+    `subgroups: ${adapter?.features.has("subgroups") ? `${info?.subgroupMinSize}-${info?.subgroupMaxSize}` : "no"}`,
+    `features: ${adapter ? [...adapter.features].sort().join(", ") : "–"}`,
+    `limits: ${limits}`,
+    `model: ${model}`,
+    `stats: ${["s-load", "s-first", "s-speed", "s-audio"].map(stat).join(" | ")}`,
+    `error: ${error ?? "none"}`,
+  ].join("\n");
+}
+
 /** Each language's first voice (outside English, the one UTMOS rated highest with no word errors
  *  in its 40M model) and sample text: a sample still in the box follows the voice's language. */
 const LANGUAGES: Record<Language, { name: string; voice: string; sample: string }> = {
@@ -373,16 +397,39 @@ async function demo(redrawBars: () => void) {
   };
   const gpu = (navigator as Navigator & { gpu?: GPU }).gpu;
   const adapter = await gpu?.requestAdapter({ powerPreference: "high-performance" }).catch(() => null);
+  const model = $<HTMLSelectElement>("model");
+  const id = () => model.value as ModelId;
+  /** The GPU line: what runs here, or why nothing does. */
+  const note = (text: string) => ($("device-text").textContent = text);
+  /** Why the demo cannot speak, over the text box, until the text is edited. */
+  const explain = (why: string) => {
+    const box = $("words");
+    box.replaceChildren(Object.assign(document.createElement("span"), { className: "why", textContent: why }));
+    box.classList.add("on");
+  };
+  let lastError: string | null = null;
+  const copy = $<HTMLButtonElement>("copy-details");
+  copy.onclick = async () => {
+    const ok = await navigator.clipboard.writeText(details(adapter ?? null, id(), lastError)).then(() => true, () => false);
+    copy.textContent = ok ? "Copied" : "Copy failed";
+    setTimeout(() => (copy.textContent = "Copy details"), 2000);
+  };
   if (!adapter) {
     button.disabled = true;
     set("s-load", "–", "no WebGPU here");
+    note("No WebGPU");
+    explain(
+      gpu
+        ? "This browser has WebGPU, but it gave no GPU to use."
+        : /Android/.test(navigator.userAgent) && /Chrome\//.test(navigator.userAgent)
+          ? "This browser has no WebGPU. Chrome on Android turns WebGPU off under Advanced Protection and on some GPUs. Firefox with WebGPU on can work."
+          : "This browser has no WebGPU, which the demo needs.",
+    );
     return;
   }
   const info = adapter.info;
   const gpuName = `GPU: ${[info.vendor, info.architecture].filter(Boolean).join(" ") || "unknown"}`;
   const text = $<HTMLTextAreaElement>("text");
-  const model = $<HTMLSelectElement>("model");
-  const id = () => model.value as ModelId;
   /** Stops what is speaking (set once the player below exists). */
   let stopAll = () => {};
 
@@ -393,7 +440,7 @@ async function demo(redrawBars: () => void) {
   /** Shows the chosen model's state: its download before it loads, then its load time. */
   const describe = (start?: { ms: number; downloaded: boolean }) => {
     const m = MODELS[id()];
-    $("device").textContent = m.license === "Apache-2.0" ? gpuName : `${gpuName} · CC BY-NC 4.0, non-commercial`;
+    note(m.license === "Apache-2.0" ? gpuName : `${gpuName} · CC BY-NC 4.0, non-commercial`);
     if (start) set("s-load", ms(start.ms), start.downloaded ? "first visit" : "cold start");
     else set("s-load", `${downloadMb(id())} MB`, "download");
   };
@@ -452,9 +499,11 @@ async function demo(redrawBars: () => void) {
       return p;
     })().catch((error) => {
       loads.delete(which);
+      lastError = `load ${which}: ${error?.stack ?? error}`;
       if (which === id()) {
-        set("s-load", "Failed", String(error?.message ?? error));
-        $("s-load").title = String(error?.message ?? error);
+        set("s-load", "Failed", "to load");
+        note("Loading failed");
+        explain(`Loading failed: ${error?.message ?? error}`);
       }
       throw error;
     });
@@ -486,11 +535,16 @@ async function demo(redrawBars: () => void) {
   let abort: AbortController | null = null;
   let last: Speech | null = null;
   let frame = 0;
+  /** The words shown, the times known so far (they arrive while the audio is made), and when
+   *  the audio ends (known once it is all made). */
+  let timed: Word[] = [];
+  let audioEnd: number | null = null;
+  const wordSpans = () => [...words.children] as HTMLElement[];
   const silence = () => {
     for (const s of sources) s.stop();
     sources = [];
     cancelAnimationFrame(frame);
-    for (const s of words.children) s.classList.remove("now");
+    for (const s of words.querySelectorAll(".lit")) s.classList.remove("lit");
   };
   const play = (chunk: Float32Array, at: number) => {
     const buffer = ctx!.createBuffer(1, chunk.length, 24000);
@@ -501,19 +555,21 @@ async function demo(redrawBars: () => void) {
     s.start(at);
     sources.push(s);
   };
-  /** Lights each word while it is heard, from audio time `start` on the context's clock, and
-   *  keeps it in view when the text is longer than the box. */
-  const follow = (speech: Speech, start: number) => {
-    const spans = [...words.children] as HTMLElement[];
+  /** Lights each word while it is heard, token by token, from audio time `start` on the
+   *  context's clock, and keeps it in view when the text is longer than the box. */
+  const follow = (start: number) => {
+    cancelAnimationFrame(frame);
+    const spans = wordSpans();
     const tick = () => {
       const t = ctx!.currentTime - start;
-      spans.forEach((s, i) => {
-        const now = t >= speech.words[i].start && t < speech.words[i].end;
-        if (now && !s.classList.contains("now") && (s.offsetTop < words.scrollTop || s.offsetTop + s.offsetHeight > words.scrollTop + words.clientHeight))
+      timed.forEach((w, i) => {
+        const s = spans[i];
+        const now = t >= w.start && t < w.end;
+        if (now && !s.firstElementChild!.classList.contains("lit") && (s.offsetTop < words.scrollTop || s.offsetTop + s.offsetHeight > words.scrollTop + words.clientHeight))
           words.scrollTop = s.offsetTop - 10;
-        s.classList.toggle("now", now);
+        w.tokens.forEach((tok, k) => s.children[k]?.classList.toggle("lit", now && t >= tok.start));
       });
-      if (t < speech.audio.length / 24000) frame = requestAnimationFrame(tick);
+      if (audioEnd === null || t < audioEnd) frame = requestAnimationFrame(tick);
       else done();
     };
     frame = requestAnimationFrame(tick);
@@ -531,17 +587,20 @@ async function demo(redrawBars: () => void) {
   };
   // Editing the text puts the words away: they belong to the text that was spoken.
   text.onfocus = () => words.classList.remove("on");
-  const showWords = (speech: Speech) => {
+  /** The words over the text, each made of its tokens, before their times are known. */
+  const showWords = (list: { text: string; tokens: string[] }[]) => {
     words.classList.add("on");
     words.scrollTop = 0;
     words.replaceChildren(
-      ...speech.words.flatMap((w) => {
+      ...list.flatMap((w, i) => {
         const s = document.createElement("span");
-        s.textContent = w.text;
+        s.className = "w";
+        s.append(...w.tokens.map((t) => Object.assign(document.createElement("span"), { textContent: t })));
         s.onclick = () => {
-          if (!ctx || last !== speech) return;
+          const speech = last;
+          if (!ctx || !speech || speech.words.length !== list.length) return;
           silence();
-          const offset = w.start;
+          const offset = speech.words[i].start;
           const at = ctx.currentTime + 0.03;
           const src = ctx.createBufferSource();
           const buffer = ctx.createBuffer(1, speech.audio.length, 24000);
@@ -551,7 +610,9 @@ async function demo(redrawBars: () => void) {
           src.start(at, offset);
           sources = [src];
           button.textContent = "Stop";
-          follow(speech, at - offset);
+          timed = speech.words;
+          audioEnd = speech.audio.length / 24000;
+          follow(at - offset);
         };
         return [s, document.createTextNode(" ")];
       }),
@@ -574,6 +635,10 @@ async function demo(redrawBars: () => void) {
       const p = tts ?? (await load());
       await warm;
       if (signal.aborted) return;
+      last = null;
+      timed = [];
+      audioEnd = null;
+      showWords(p.words(text.value));
       const t0 = performance.now();
       let first = 0;
       let made = 0;
@@ -589,11 +654,14 @@ async function demo(redrawBars: () => void) {
         voice: voice.value,
         speed: Number(speed.value),
         signal,
+        // Each word lights from its first token as soon as its times arrive, before it is heard.
+        onWord: (w) => timed.push(w),
         onAudio: (chunk) => {
           if (!first) {
             first = performance.now() - t0;
             set("s-first", ms(first));
             at = ctx!.currentTime + 0.05;
+            follow(at);
           }
           play(chunk, at);
           at += chunk.length / 24000;
@@ -604,15 +672,19 @@ async function demo(redrawBars: () => void) {
       $("s-speed").classList.remove("live");
       live();
       last = speech;
+      audioEnd = speech.audio.length / 24000;
       if (id() === BENCHMARKED) {
         mine.warmRealtime = made / ((performance.now() - t0) / 1000);
         mine.warmFirstMs = first;
       }
       redrawBars();
-      showWords(speech);
-      follow(speech, at - speech.audio.length / 24000);
     } catch (error) {
-      if (!signal.aborted) set("s-first", "Failed", String((error as Error)?.message ?? error));
+      if (!signal.aborted) {
+        lastError = `speak ${id()}: ${(error as Error)?.stack ?? error}`;
+        set("s-first", "Failed", "to speak");
+        note("Speaking failed");
+        explain(`Speaking failed: ${(error as Error)?.message ?? error}`);
+      }
       silence();
       done();
     }
